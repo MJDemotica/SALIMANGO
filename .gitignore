@@ -1,0 +1,13 @@
+
+# Hardware guide (merged Components+BOM — keep local only)
+HARDWARE.md
+
+# References folder (internal/personal docs)
+references/
+
+# OS files
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+
