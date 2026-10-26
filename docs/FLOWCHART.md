@@ -2,79 +2,100 @@
 
 **Project:** Solar Automated LoRa-Integrated Mud Crab Aeration Network with Crab Grid Observation
 
-This document presents the operational flowchart of the system in the format required . It traces one complete control cycle: sensor acquisition and automatic first-aid logic at the float node, LoRa transmission to the house bridge node, telemetry storage in Firebase, dashboard command relay, and the fail-safe mode rules enforced by the firmware ([`FIRMWARE.md`](FIRMWARE.md) §2).
+One control cycle of the current phase: sensing and local control on the ESP32, the Wi-Fi report to
+Supabase, and dashboard commands. Rules are detailed in [`FIRMWARE.md`](FIRMWARE.md) §2.
 
 ## 1. Flowchart
 
 ```mermaid
 flowchart TD
-    subgraph FLOAT["Float Node - ESP32 + E22-900T22D (pond side)"]
-        A([Start: power on or reset]) --> B[Initialize GPIO, sensor interfaces, relays and LoRa radio]
-        B --> C[Initialize mode: AUTO with aeration ON]
-        C --> D{Local selector mode}
-        D -->|OFF| E[Keep all actuators off]
-        D -->|MANUAL| F[Apply operator command from selector or webapp]
-        F --> F1{No command received for 5 minutes?}
-        F1 -->|Yes| D
-        D -->|AUTO| G[Read DO, pH, EC/salinity and temperature probes]
-        G --> H{DO below 3 ppm?}
-        H -->|Yes| I[Force aeration ON and raise alarm]
-        I --> I1[Queue immediate emergency uplink]
-        H -->|No| J{Salinity below threshold?}
-        J -->|Yes| K[Energize assigned bilge pump]
-        J -->|No| L[Run scheduled aeration per thresholds]
-        M[Compose uplink: sensor data, mode, pump state and heartbeat]
-        E --> M
-        F1 -->|No| M
-        I1 --> M
-        K --> M
-        L --> M
-        M --> N[Transmit LoRa packet to the house bridge]
-        N --> O{Downlink command received?}
-        O -->|Yes| P[Validate device ID, sequence, expiry and CRC-8]
-        P -->|Valid and fresh| Q[Apply mode and pump command, return ACK]
-        P -->|Invalid or stale| R[Return NAK and keep current mode]
-        O -->|No| S[Wait for the next heartbeat cycle]
-        Q --> D
+    subgraph NODE["Float node - ESP32 (control loop, core 1)"]
+        A([Power on or reset]) --> B[Relay pins HIGH = off, then init sensors, load calibration and settings from NVS]
+        B --> C["Mode from selector; AUTO unless the selector is at M or O; air pumps ON"]
+        C --> D["Read DS18B20, pH, EC, DO; validate; compute PSS-78 salinity and Emerson NH3 fraction"]
+        D --> E{Selector position}
+        E -->|O| M0[Mode OFF]
+        E -->|M| M1[Mode MANUAL]
+        E -->|A or fault| M2[Mode requested by the dashboard, default AUTO]
+        M1 --> T{5 min without a manual command?}
+        M2 --> T
+        T -->|Yes| M3[Back to AUTO]
+        T -->|No| F
+        M0 --> F
+        M3 --> F
+        F{Valid DO below 3.0 mg/L for 3 readings?}
+        F -->|Yes| G[DO emergency: K1 + K5 forced ON in every mode, event]
+        F -->|No| H{Mode}
+        G --> H
+        H -->|AUTO| I["DO below 3.0 for 3 readings: K1, then K5 after 5 s; above 3.0 for 3 readings: both off"]
+        I --> J{Salinity below salMin for 3 readings?}
+        J -->|Yes, bilge idle| K[K3, then K4 after 2 s]
+        K --> K2{Salinity at salMin + salHyst, or max run reached?}
+        K2 -->|Recovered| K3[Stop, rest]
+        K2 -->|Timeout| K4{Too many timeouts?}
+        K4 -->|Yes| K5[Lockout + critical event]
+        K4 -->|No| K3
+        J -->|No| O
+        K3 --> O
+        K5 --> O
+        H -->|MANUAL| L[Relays as commanded from the dashboard]
+        H -->|OFF| N[All relays off except the DO emergency]
+        L --> O
+        N --> O
+        O["Apply relay outputs; publish state"] --> P{Command received?}
+        P -->|Yes| Q{Valid for the current selector, mode and DO interlock?}
+        Q -->|Yes| R["Apply; ack accepted"]
+        Q -->|No| S[Ack rejected with the reason]
+        P -->|No| D
         R --> D
         S --> D
     end
 
-    subgraph BRIDGE["House Bridge Node - ESP32 + E22-900T22D (where WiFi exists)"]
-        T[Receive uplink and verify device ID and CRC-8] --> U[Write telemetry to the Firebase Realtime Database]
-        U --> V[Poll the Realtime Database for queued commands]
-        V --> W{Fresh dashboard command queued?}
-        W -->|Yes| X[Send the command downlink over LoRa]
-        X --> Y{ACK received from the float node?}
-        Y -->|Timeout or NAK| X
-        Y -->|ACK| Z[Wait for the next uplink]
-        W -->|No| Z
+    subgraph CLOUD["Float node - cloud task (core 0)"]
+        U[Every 10 s, 2 s when busy: POST device_report with state, acks, events] --> V{Response OK?}
+        V -->|Yes| W[Queue commands and new settings for the control loop]
+        V -->|No| X["Keep acks and events, retry with backoff; LED blinks"]
     end
 
-    subgraph DASH["Remote Dashboard - Next.js + Firebase on Vercel"]
-        AA["onValue() listeners stream live telemetry to the web UI"] --> AB[Operator selects mode or per-pump override]
-        AB --> AC[Route handler writes the command into the Realtime Database]
+    subgraph SB["Supabase"]
+        Y["Store state, history once a minute, events, calibration records; resolve acks; expire old requests"]
+        Y --> Z[Realtime to the dashboard]
     end
 
-    N --> T
-    AC --> V
+    subgraph DASH["React dashboard (Vercel)"]
+        AA[Live cards, charts, stale and simulated banners] --> AB[Operator requests mode, pumps, calibration or settings]
+        AB --> AC[request_command / update_device_settings validate and queue]
+    end
+
+    O --> U
+    U --> Y
+    Z --> AA
+    AC --> Y
+    W --> P
 ```
 
-**Figure 1.** Overall operational flowchart of the Solar Automated LoRa-Integrated Mud Crab Aeration Network.
+**Figure 1.** Operational flowchart of the current phase.
 
-## 2. Flow Description
+## 2. Flow description
 
-1. **Initialization.** On power-up or reset the node forces mode AUTO with aeration ON — the fail-safe default ([`FIRMWARE.md`](FIRMWARE.md) §2).
-2. **Mode selection.** The local selector decodes AUTO, MANUAL, or OFF ([`WIRING.md`](WIRING.md) §6). OFF exists for servicing only.
-3. **Automatic first aid.** In AUTO the firmware reads dissolved oxygen, pH, EC/salinity, and temperature. DO below 3 ppm overrides every mode, forces aeration, and triggers an immediate emergency uplink.
-4. **Salinity logic.** A sub-threshold salinity run engages the assigned bilge pump for flushing or controlled brine testing; open-water salinity correction is not claimed ([`Components.md`](Components.md) — Water circulation).
-5. **Uplink.** Every cycle composes one frame — sensor data, mode, pump state, heartbeat — transmitted over 915 MHz LoRa point-to-point.
-6. **Downlink handling.** Commands are accepted only when the device ID, sequence, expiry window, and CRC-8 all validate; otherwise the float returns a NAK and keeps its current mode.
-7. **Bridge and cloud.** The house bridge verifies each uplink, writes telemetry to the Realtime Database, relays queued dashboard commands downlink, and tracks ACK/NAK results.
-8. **Dashboard.** `onValue()` listeners stream the live state to the web UI; operator commands enter the Realtime Database queue ([`APP.md`](APP.md) §4).
+1. **Boot.** Relays are held off during initialisation, then the air pumps start (fail-safe).
+   Calibration and settings come from flash, so the node works without the network.
+2. **Sensing.** Each reading is validated; a fault or out-of-range value is reported as such, never as
+   a number. Salinity and the NH₃ fraction need a valid temperature.
+3. **Mode.** The selector decides at M and O; at A the dashboard chooses. MANUAL returns to AUTO after
+   5 minutes without a command.
+4. **DO emergency.** Evaluated in every mode, before anything else.
+5. **AUTO.** Aeration by DO; salinity correction by the `salinity_rev.md` state machine, evaluated
+   independently of the DO branch.
+6. **Commands.** Validated twice (database, then device) and acknowledged with a reason.
+7. **Reporting.** A separate task sends the state; network problems never block the control loop.
 
-## 3. Fail-Safe Notes
+## 3. Fail-safe notes
 
-- MANUAL auto-reverts to AUTO after 5 minutes without a fresh command.
-- Heartbeat loss beyond 90 s raises an alarm at the house bridge.
-- The physical selector always overrides dashboard intent at the device.
+- Boot, reset and Wi-Fi loss never switch aeration off.
+- A missing DO reading counts as low for AUTO aeration.
+- The selector always overrides the dashboard at the device.
+- Stale data on the dashboard is shown as stale; an old mode is never shown as confirmed.
+
+The image `SYSTEM FLOWCHART SALIMANGO3.drawio.png` in the repository root shows the previous
+(LoRa / camera) design and has not been updated.

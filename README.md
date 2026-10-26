@@ -2,345 +2,268 @@
 
 # Solar Automated LoRa-Integrated Mud Crab Aeration Network with Crab Grid Observation
 
-A house-powered, remotely monitored smart aquaculture system for mud crab fattening in mangrove areas — combining physical crab separation, continuous water quality monitoring, automated aeration and alerts, LoRa remote control, and overhead visual security.
+**S.A.L.I.M.A.N.G.O.** — a house-powered, remotely monitored smart aquaculture system for mud crab
+fattening in mangrove areas: individual floating cages, continuous water-quality monitoring, automatic
+aeration and salinity correction, and a phone-friendly dashboard.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: ESP32](https://img.shields.io/badge/Platform-ESP32-red.svg)](https://www.espressif.com/)
-[![LoRa: 915 MHz P2P](https://img.shields.io/badge/LoRa-915%20MHz%20P2P-green.svg)](#electronics--hardware)
-[![Power: 220V AC from House Solar](https://img.shields.io/badge/Power-220V%20AC%20from%20House%20Solar-yellow.svg)](#power-system)
+[![Backend: Supabase](https://img.shields.io/badge/Backend-Supabase-3ecf8e.svg)](https://supabase.com/)
+[![Frontend: React](https://img.shields.io/badge/Frontend-React-61dafb.svg)](https://react.dev/)
 [![Status: In Development](https://img.shields.io/badge/Status-In%20Development-orange.svg)]()
 
 **Author:** [QPPD](https://www.github.com/qppd)
 
 </div>
 
+> **Current phase (revision 2026-10).** The float node reports **directly over the house Wi-Fi to
+> Supabase**, and farmers open a **React** dashboard by scanning the QR sticker on the box. **LoRa is
+> deferred** to a future phase (the project title is kept), the **camera is removed**, and Firebase is
+> replaced by Supabase. What changed and what is still unverified: [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
+
 ---
-
-
-
 
 ## Table of Contents
 
 - [About the Project](#about-the-project)
-- [Core Capabilities](#core-capabilities)
+- [Architecture Decisions](#architecture-decisions)
 - [System Architecture](#system-architecture)
-- [Structure & Layout](#structure--layout)
+- [Water Quality Sensing](#water-quality-sensing)
+- [Control Modes](#control-modes)
 - [Electronics & Hardware](#electronics--hardware)
 - [Power System](#power-system)
-- [Software & Firmware](#software--firmware)
-- [BOM & Budget](#bom--budget)
 - [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Hardware Setup](#hardware-setup)
-  - [Firmware Installation](#firmware-installation)
-  - [Dashboard Configuration](#dashboard-configuration)
 - [Project Structure](#project-structure)
-- [Compatibility Notes](#compatibility-notes)
+- [Implementation Status](#implementation-status)
+- [Known Limitations](#known-limitations)
 - [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
+- [Contributing](#contributing) · [License](#license) · [Contact](#contact)
 
 ---
 
 ## About the Project
 
-Mud crab (*Scylla serrata*) fattening is a vital livelihood in Southeast Asian mangrove communities, but crabs are notoriously cannibalistic — they eat each other when crowded or molting. Traditional farming relies on manual water monitoring, which is reactive rather than proactive. In these remote mangrove areas there is no utility grid and no Wi-Fi, and whatever power exists comes from small household solar systems — which makes conventional IoT solutions impractical.
+Mud crab (*Scylla serrata*) fattening is a vital livelihood in Southeast Asian mangrove communities, but
+crabs are cannibalistic when crowded or molting, and water quality is usually checked by hand. This
+project:
 
-This project solves these problems with a **low-power, remotely monitored aquaculture system** that:
+1. Physically separates crabs in individual floating boxes on a pontoon grid.
+2. Continuously measures **pH, salinity, water temperature and dissolved oxygen**, and estimates the
+   **ammonia toxicity** fraction from pH and temperature.
+3. Runs aeration and salinity correction **automatically on the controller**, with a local selector
+   switch as the fail-safe.
+4. Shows live readings, history and controls on a dashboard opened from a **QR code** — no usernames or
+   passwords to remember.
 
-1. Physically protects crabs using individual floating cages
-2. Continuously senses water quality with multiple environmental sensors
-3. Automatically triggers aeration and alerts; salinity correction is treated as a controlled test function, not a guaranteed open-water correction
-4. Transmits data over **LoRa** to a bridge node at the house (where WiFi exists) for real-time remote monitoring
-5. Provides visual security through an overhead camera system
-
-The prototype is powered from the **household's existing solar installation** (220V AC, available 24/7 from the array, the inverter and a battery bank of over 600 Ah), so it needs no panels or batteries of its own — only a protected AC drop from the house to the float plus a 12V DC supply on site.
+Power comes from the household's existing 24/7 solar installation (220 V AC → 12 V DC on the float).
 
 ---
 
-## Core Capabilities
+## Architecture Decisions
 
-| Feature | Description |
-|---------|-------------|
-| **Physical Protection** | Individual floating cages (horizontal crab fattening boxes) physically separate crabs to prevent cannibalism. |
-| **Water Quality Sensing** | Continuous monitoring of dissolved oxygen, pH, temperature and salinity — plus a pH/temperature-derived ammonia toxicity-risk indicator. Absolute NH₃ concentration requires a TAN measurement or laboratory test. |
-| **Automated First Aid** | When conditions become dangerous, the system forces aeration, raises an alarm, and logs the event. Open-water salinity correction is not assumed; brine dosing is only valid in an isolated or closed-loop test enclosure. |
-| **Manual & Automatic Control** | Runs itself in **AUTO** (firmware thresholds drive the pumps) and accepts **MANUAL** or **OFF** from the dashboard webapp, with a physical selector on the box as the fail-safe. |
-| **Remote Monitoring & Control** | LoRa carries sensor data and pump commands to the house bridge node, which feeds the remote dashboard — even where there is no internet or Wi-Fi at the pond. |
-| **Visual Security** | Overhead camera to monitor crab molting, deter animal predators, and spot human poachers. |
+| Area | Current-phase requirement |
+|------|---------------------------|
+| Frontend | React.js (Vite + TypeScript) on Vercel |
+| Backend | Supabase (PostgreSQL, Realtime, row-level security) |
+| Communication | Direct ESP32 Wi-Fi (HTTPS) |
+| Separate house bridge | Not required |
+| Camera | Removed |
+| LoRa | Deferred |
+| Website access | QR code or typable code |
+| EC probe | DFRobot Analog EC (DFR0300), K = 1 |
+| Pin assignments | Referenced against [`perfboard_build_guide.pdf`](perfboard_build_guide.pdf) |
+| Calibration | Existing sensor-specific routines reused and persistently integrated |
 
 ---
 
 ## System Architecture
 
 ```
-                            ┌─────────────────────────────────────┐
-                            │      REMOTE DASHBOARD (Next.js      │
-                            │         + Firebase webapp)          │
-                            └──────────────┬──────────────────────┘
-                                           │ Internet / WiFi
-                                           │
-                            ┌──────────────┴──────────────────────┐
-                            │  House Bridge Node (ESP32 + E22)    │
-                            │  at the house, where WiFi exists    │
-                            └──────────────┬──────────────────────┘
-                                           │ LoRa (915 MHz, P2P)
-                            ┌──────────────┴──────────────────────┐
-                            │   ESP32 DevKit + E22 (SX1262)       │
-                            │       — Main Controller Node        │
-                            └──┬─────┬──────┬──────┬──────┬───────┘
-                               │     │      │      │      │
-                  ┌────────────┘     │      │      │      └────────────┐
-                  │                  │      │      │                   │
-          ┌───────┴────────┐  ┌─────┴────┐ │ ┌────┴───────┐  ┌───────┴──────┐
-          │  Water Sensors │  │  Relay   │ │ │  Camera    │  │  House Solar │
-          │  · EC/Salinity │  │  Module  │ │ │  ESP32-CAM-MB │  │  AC Feed     │
-          │  · pH Probe    │  │  (8-Ch)  │ │ │  OV2640    │  │  · 220V 24/7 │
-          │  · DS18B20 ×2  │  └────┬─────┘ │ └────────────┘  │  · RCD 30mA  │
-          │  · DO Sensor   │       │       │                  │  · 12V 30A   │
-          └────────────────┘  ┌────┴─────┐ │                  │    PSU       │
-                              │ Actuators│ │                  └──────────────┘
-                              │ · Air    │ │
-                              │   Pumps  │ │
-                              │ · Bilge  │ │
-                              │   Pumps  │ │
-                              └──────────┘ │
-                                           │
-                              ┌─────────────┴───────────┐
-                              │   8 × Individual Crab   │
-                              │   Fattening Boxes on     │
-                              │   Foam Pontoon Grid      │
-                              └─────────────────────────┘
+  ┌───────────────────────────────┐        ┌──────────────────────────────┐
+  │ React dashboard (Vercel)      │◄──────►│ Supabase                     │
+  │ QR sticker / typed code       │Realtime│ PostgreSQL + RLS + Realtime  │
+  │ Water Quality · Calibration · │  RPC   │ state, history, commands,    │
+  │ Settings & Data (CSV)         │        │ calibration, events          │
+  └───────────────────────────────┘        └──────────────▲───────────────┘
+                                                          │ HTTPS every 10 s
+                                                          │ (house Wi-Fi, 2.4 GHz)
+                                           ┌──────────────┴───────────────┐
+                                           │ ESP32 float node (perfboard) │
+                                           │ sensing · calibration ·      │
+                                           │ AUTO/MANUAL/OFF · safety     │
+                                           └──┬──────────┬─────────────┬──┘
+                     ┌────────────────────────┘          │             └──────────────┐
+          ┌──────────┴─────────┐           ┌────────────┴──────────┐   ┌──────────────┴──────┐
+          │ pH  (GPIO34)       │           │ Relay module          │   │ M-O-A selector      │
+          │ EC K=1 (GPIO35)    │           │ K1/K5 air pumps       │   │ GPIO4 / GPIO21      │
+          │ DO  (GPIO36)       │           │ K3/K4 bilge pumps     │   │ local authority     │
+          │ DS18B20 (GPIO19)   │           └───────────────────────┘   └─────────────────────┘
+          └────────────────────┘
 ```
+
+Details: [`docs/SYSTEM-ARCHITECTURE.md`](docs/SYSTEM-ARCHITECTURE.md),
+[`docs/BLOCK-DIAGRAM.md`](docs/BLOCK-DIAGRAM.md), [`docs/FLOWCHART.md`](docs/FLOWCHART.md).
 
 ---
 
-## Structure & Layout
+## Water Quality Sensing
 
-| Specification | Detail |
-|---------------|--------|
-| **Pond Area** | 500 sqm (modular conceptual prototype) |
-| **Capacity** | 8 individual fattening boxes on the pontoon grid, one crab per box (the anti-cannibalism constraint) |
-| **Boxes & frames** | Slotted plastic boxes, shaded under the frame; frame/gantry preferably UV-stabilized PVC/FRP, or marine-grade timber sealed with marine epoxy/PU and Grade 316/nylon fasteners |
-| **Floaters** | Ready-made foam-filled pontoon floats (×8–12), each with a manufacturer-rated buoyancy of at least 50 kg. Final sizing uses the measured dry above-water load and load distribution; water inside slotted cages is not counted as dead load while submerged. The PVC pipes are **conduit, never flotation**: water-filled pipe weighs ~1 kg per litre (see [Components.md](docs/Components.md)). |
-| **Aeration** | 2 × RESUN MPQ-03 (MPQ-903) 12V air pumps (35W, 68 L/min open-flow, 6 outlets) + air stone per cage — regulate and measure the delivered flow. The biological target is approximately 4.8–6.4 L/min total for 320 L (1.5–2 L/min per 100 L), with N+1 redundancy. |
-| **Air & water routing** | Two separate circuits inside the PVC pipe grid: an air header with per-cage drop tubes and stones, and a water header fed by the bilge pumps with a valved outlet per cage. Flexible hose runs from pump to cage are an option/backup |
-| **Sensor hub** | Centred on the grid for balance and symmetric cable runs; probes at mid-depth (~20–30 cm), clear of the aerator plume. The DO probe must have gentle water movement across its membrane; one probe is a single-point risk, so use a handheld meter or scheduled aeration as a fallback. |
-| **Controller & Power** | Controller centred in the setup for optimal wiring. Powered by a 220V AC drop from the household solar system (24/7) → shore-end 30 mA RCD + 2-pole breaker → weatherproof feedthroughs → 12V 30A DC supply. The AC installation and conductor/fuse sizing require a licensed electrician and Philippine Electrical Code review. |
+| Indicator | Sensor / method | Dashboard |
+|-----------|-----------------|-----------|
+| pH | E-201-C + PH-4502C, Nernst-scaled 1–3 buffer calibration (4.01 / 6.86 / 9.18) | Value, status, target 7.5–8.5, calibration |
+| Salinity | DFRobot DFR0300 (K = 1) conductivity, temperature-compensated; **PSS-78** practical salinity | ppt + conductivity (mS/cm) + EC25; *over range* above ≈ 11 ppt |
+| Temperature | DS18B20 | °C; compensates pH, EC/salinity and DO; no calibration |
+| Dissolved oxygen | DFRobot SEN0237-A, saturation calibration | mg/L; < 3 critical, < 5 warning |
+| Ammonia toxicity | **Emerson et al. (1975)** unionized NH₃ fraction from pH + temperature | % NH₃ (a fraction, not a concentration — no TAN is measured) |
 
-> See [`Components.md`](docs/Components.md) for the full component specifications and [`docs/BOM.md`](docs/BOM.md) for the detailed Bill of Materials with verified product links and pricing.
+All five are computed on the ESP32 and stored with an explicit status, so a failed sensor is never
+shown as 0. Calibration: [`docs/CALIBRATION.md`](docs/CALIBRATION.md).
+
+---
+
+## Control Modes
+
+| Mode | Pumps | Notes |
+|------|-------|-------|
+| **AUTO** (default) | Low DO → both air pumps (K1, then K5 5 s later); low salinity → both bilge pumps (K3, then K4 2 s later) with hysteresis, max run, rest and lockout | Runs entirely on the ESP32 |
+| **MANUAL** | Switched one by one from the dashboard | Returns to AUTO after 5 min without a command |
+| **OFF** | All off | For servicing; requires confirmation |
+
+- The **M-O-A selector** on the box decides at M and O; at A the dashboard chooses.
+- A **valid DO below 3 mg/L** forces both air pumps on in **every** mode, including OFF.
+- Boot, reset and Wi-Fi loss never switch aeration off. The float keeps controlling without the network.
+- The dashboard shows the **requested** and the **confirmed** mode separately, and every command's
+  outcome (done / refused with a reason / no answer).
+
+Rules: [`docs/FIRMWARE.md`](docs/FIRMWARE.md) §2. Salinity rule source: [`salinity_rev.md`](salinity_rev.md).
 
 ---
 
 ## Electronics & Hardware
 
 | Component | Specification | Purpose |
-|-----------|--------------|---------|
-| **ESP32 DevKit 38-pin + EBYTE E22-900T22D (SX1262, 22 dBm)** | ESP32-WROOM-32 + 915 MHz LoRa (E22-900T22D, 22 dBm, UART) | Main controller node — reads all sensors, runs automation logic, communicates over point-to-point LoRa on the 915 MHz ISM band. Built-in SMA antenna. Verify measured EIRP and NTC type-approval before deployment. |
-| **House Bridge Node (ESP32 + E22-900T22D)** | Same radio stack, at the house | LoRa ⇄ WiFi bridge — pushes float telemetry to the Firebase dashboard and relays dashboard commands back down over LoRa |
-| **ESP32-CAM-MB** | OV2640, WiFi/BT | Overhead camera node for visual monitoring |
-| **8-Channel Relay Module** | 12V coil, optocoupler, low-level trigger | Drives aerators and salinity pumps with spare channels |
-| **DFRobot EC/Salinity Sensor** | K=10, 0–100 mS/cm | Measures conductivity/salinity. Use the manufacturer/PSS-78 conversion rather than a fixed 0.66 ppt-per-mS/cm rule; 35 ppt seawater is approximately 53 mS/cm at 25 °C. |
-| **pH Electrode E-201-C** | PH-4502C analog board | Monitors pH (target: 7.5–8.5 for brackish water) |
-| **DS18B20 Temperature Probes** | Waterproof, stainless steel ×2 | Digital temperature sensing (1-Wire) |
-| **DFRobot Dissolved Oxygen Kit** | SEN0237-A, galvanic probe — **one unit (single measurement point)** | Measures dissolved oxygen — the #1 crab killer; mounted on the centred hub with water movement across the membrane. Carry a handheld DO meter and spare membrane/electrolyte because one probe is a single-point failure. |
-| **12V DC Air Pumps (RESUN MPQ-03)** | Electromagnetic, 35W, 68 L/min open-flow, 0.068 MPa, ~3.5A, 6 outlets each ×2 | Oxygenation for all 8 cages; regulate each branch to the measured biological target (about 0.6–0.8 L/min per cage for 4.8–6.4 L/min total) + N+1 redundancy (alternating duty). Huge open-flow headroom covers depth/tubing/stone losses — must not be dumped unregulated into the cages. |
-| **12V Marine Bilge Pumps** | 1100 GPH, submersible ×2 | Water circulation/flushing and a controlled salinity experiment. Do not claim reliable salinity correction in open slotted cages: tidal flushing and dense brine sinking will defeat dosing unless the cage is temporarily isolated or the test is closed-loop. |
+|-----------|---------------|---------|
+| ESP32 DevKit 38-pin (ESP32-WROOM-32) on the perfboard | Wi-Fi, ADC1 analog inputs | Sensing, control, reporting |
+| DFRobot DFR0300 EC | **K = 1**, 0–20 mS/cm (≈ 18 mS/cm usable on the ESP32) | Conductivity → salinity |
+| E-201-C + PH-4502C | 5 V board through a 10 kΩ / 20 kΩ divider | pH |
+| DFRobot SEN0237-A | Galvanic DO probe, one unit | Dissolved oxygen |
+| DS18B20 | Waterproof, 1-Wire | Temperature |
+| Relay module | 8-channel, 5 V, low-level trigger; K1, K5, K3, K4 used (K2 defective) | Pump switching |
+| 2 × RESUN MPQ-03 air pumps | 12 V, 35 W, 68 L/min open flow | Aeration |
+| 2 × 12 V bilge pumps | 1100 GPH | Circulation / controlled salinity correction |
+| INScom LW28-20A selector | M-O-A | Local mode authority |
+
+Pin map and wiring: [`docs/WIRING.md`](docs/WIRING.md) (from `perfboard_build_guide.pdf`).
+Specifications and rationale: [`docs/Components.md`](docs/Components.md). Prices: [`docs/BOM.md`](docs/BOM.md).
+
+Salinity correction in open slotted cages is not guaranteed (tidal exchange and dense brine defeat
+dosing); it is a controlled experiment in an isolated or closed-loop volume.
 
 ---
 
 ## Power System
 
 | Component | Specification |
-|-----------|--------------|
-| **AC Source** | 220V AC drop from the household solar system (array + **>600 Ah** battery bank + inverter) — available 24/7 |
-| **AC Protection** | 30 mA RCD/GFCI + 2-pole breaker at the house end; outdoor-rated earthed cable (2.5 mm²) run overhead or in conduit; IP67/IP68 weatherproof connectors, drip loops, no submerged joints, monthly RCD test, and licensed-electrician commissioning. |
-| **On-Site DC Supply** | 12V 30A (360 W) switching PSU → pumps, relay module, controller; LM2596S 24V/12V → 5V USB step-down module for the camera node. Treat 30A and the branch fuses as provisional until pump nameplate current, inrush, conductor ampacity, and voltage drop are measured and signed off. |
+|-----------|---------------|
+| AC source | 220 V AC from the household solar system (array + > 600 Ah bank + inverter), 24/7 |
+| AC protection | Shore-end 30 mA RCD + 2-pole breaker, outdoor-rated earthed cable, IP67/IP68 terminations; licensed electrician |
+| On-site DC | 12 V 30 A PSU → pumps through relays and branch fuses; 12 V → 5 V buck for the ESP32 and relay module |
 
-**Night load:** the planning estimate is ~50–60 W (≈ 5 A at 12 V) for aeration, but verify the actual pump duty cycle and inverter losses before relying on the household bank. The full Power Budget is in [`docs/BOM.md`](docs/BOM.md).
-
-> **Single point of failure:** no on-site battery, so a tripped breaker or a cut cable stops aeration. The house bridge must alarm on heartbeat loss; use a local UPS/supercapacitor only if a last-gasp packet or unattended-night runtime is required.
-
----
-
-## Software & Firmware
-
-- **Microcontroller Firmware:** ESP32 (Arduino/PlatformIO) — sensor reading, LoRa P2P communication, relay control
-- **LoRa Link:** point-to-point 915 MHz (E22-900T22D / SX1262, 22 dBm) between the float node and the house bridge node — no LoRaWAN server (TTN/ChirpStack) needed. 915 MHz is the Philippine NTC licence-free SRD band for this low-duty telemetry; confirm maximum EIRP and type-approval before deployment.
-- **Dashboard:** a **Next.js + Firebase (Realtime Database + Auth)** webapp — the house bridge node writes sensor data into the Realtime Database, and dashboard commands are read back and relayed down over LoRa
-- **Camera:** WiFi-based streaming from ESP32-CAM-MB (local AP during pond visits)
-
-### Control Modes
-
-| Mode | Drives the pumps | When to use |
-|------|------------------|-------------|
-| **AUTO** (default) | Firmware thresholds — low salinity → bilge pump, low DO → aerator | Normal operation, and the fallback whenever anything else fails |
-| **MANUAL** | The operator, per pump, from the webapp or the local selector | Testing, calibration, maintenance, harvest |
-| **OFF** | Nobody — all actuators off | Servicing the float only; never while crabs are stocked |
-
-Rules the firmware enforces:
-
-- Boot, reset or link loss → **AUTO**, with aeration defaulting **ON**
-- MANUAL auto-reverts to AUTO after 5 min without a command, so a forgotten switch cannot disable life-support aeration
-- A DO reading below 3 ppm overrides MANUAL, forces aeration on, sends an immediate emergency uplink and raises an alarm
-- The float sends a heartbeat at least every 60 seconds; the house bridge alarms on missed heartbeats
-- Mode and pump state are echoed in every uplink, so the dashboard shows what the device actually believes
-
-**Downlink packet:** device ID + sequence number + mode/pump command + expiry/ack field + CRC-8. The receiver validates the ID and CRC, applies the command only if it is fresh, and returns an ACK/NAK. Normal polling may be 5–15 minutes, but emergency sensor events bypass the schedule.
-
----
-
-## BOM & Budget
-
-Every part, price, product link and rating lives in [`docs/BOM.md`](docs/BOM.md), together with the compatibility verification and the power budget. Headline totals: **Tier 1 sensors ≈ ₱39,787–48,879**; **full sensor set ≈ ₱53,182–63,473** (per-category ranges are in the BOM).
-
-Purchase is phased to match the project timeline — the four phases add up to the build total above (≈ **₱53,182–63,473** at item prices):
-
-### Phase 1 — Bench Testing (~₱2,906)
-2 × ESP32 DevKit + 2 × E22-900T22D/915 MHz built-in antenna + DS18B20 + relay module + one bilge pump + the AUTO/OFF/MANUAL selector → build & test the control loop and the LoRa link on the bench (12V from a lab supply, or buy the on-site PSU now).
-
-### Phase 2 — Remote Dashboard (~₱7,127–7,727)
-House bridge node (ESP32 + E22-900T22D) + EC/salinity sensor + refractometer + calibration standard → close the remote monitoring loop.
-
-### Phase 3 — Power to the Float (~₱3,127–4,969)
-Protected 220V AC drop from the house (30 mA RCD + breaker) + 12V 30A DC supply + LM2596S camera module + fuses/glands → run the float off the household solar system. A licensed electrician must install and commission the mains side.
-
-### Phase 4 — Full Feature Set (~₱34,850–46,400)
-DO sensor + pH sensor (+ buffers) + ESP32-CAM-MB camera + second circulation pump + fattening boxes + frame/netting + **4× round foam floats 50×90** + the PVC air/water grid + sensor hub + air pumps + misc hardware + a controlled salinity-test setup → complete system before deployment. Open-water brine correction is not a guaranteed feature.
+No on-site battery: a power cut stops aeration. The dashboard shows it as stale data and a `boot` event
+when power returns. See [`docs/BOM.md`](docs/BOM.md) for the power budget.
 
 ---
 
 ## Getting Started
 
-### Prerequisites
+1. **Supabase:** create a project, run [`supabase/migrations/20261026000000_salimango_initial.sql`](supabase/migrations/20261026000000_salimango_initial.sql), enable anonymous sign-ins.
+2. **Vercel:** import the repo with root directory `web`, set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+3. **Provision** each float node: `cd web && npm install && npm run provision -- --name "Float node 1" --url https://<your-site>.vercel.app --sql` → QR sticker, access code, device token.
+4. **Flash the ESP32:** [`firmware/README.md`](firmware/README.md).
+5. **Calibrate** pH, EC and DO before trusting any reading.
 
-- [Arduino IDE](https://www.arduino.cc/en/software) or [PlatformIO](https://platformio.org/)
-- ESP32 board package (esp32 by Espressif)
-- `EBYTE` (UART LoRa module control) · `OneWire` / `DallasTemperature` (DS18B20) · `DFRobot_EC` / `DFRobot_pH` (DFRobot sensors)
-- 3 × ESP32 DevKit 38-pin + 3 × E22-900T22D + 915 MHz built-in antenna (float node, house bridge, spare — see [`docs/BOM.md`](docs/BOM.md) §1)
-- pH/EC calibration standards and a handheld refractometer (see [`docs/BOM.md`](docs/BOM.md) §6)
-
-### Hardware Setup
-
-1. **Scaffold the floating grid** on foam-filled pontoon floats, with the frame and gantry in UV-stabilized PVC/FRP or properly sealed marine-grade material; use Grade 316 stainless or nylon fasteners in brackish water.
-2. **Mount the 8 fattening boxes** on the grid, one crab per box, shaded from direct sun.
-3. **Position the controller node** (ESP32 + E22-900T22D) in the centre of the setup in an IP65 enclosure.
-4. **Connect the sensors** to the ESP32 ADC/GPIO pins per the pin map in [`Components.md`](docs/Components.md). For the minimum pH divider use 10 kΩ series + 18 kΩ shunt (5 V → about 3.21 V); for professional-grade pH, use an ADS1115 I2C ADC and 3.3 V level shifting.
-5. **Wire the relay module** to the air pumps and bilge pumps, following the WiFi/boot-safe pin map in [`Components.md`](docs/Components.md) (no analog on ADC2 pins while WiFi runs, nothing on boot-strap pins 0/12/15).
-6. **Run the power drop** — 220V AC from the house (30 mA RCD + breaker at the house end, weatherproof IP67/IP68 terminations, drip loops, no submerged joints) → 12V 30A DC supply on the float → fused distribution. Have a licensed electrician verify conductor size, earthing, breaker coordination and Philippine Electrical Code compliance.
-7. **Calibrate before trusting any reading** — 2-point pH (4.01 / 6.86), EC with 1.413 mS/cm and 12.88 mS/cm standards following the sensor procedure, and cross-check salinity with the refractometer. Treat 12.88 mS/cm as a conductivity standard, not as 35 ppt seawater.
-
-### Firmware Installation
-
-1. Create the `firmware/` directory (planned — see [Project Structure](#project-structure)) and open it in Arduino IDE or PlatformIO.
-2. Install required libraries:
-   EBYTE (UART LoRa module control for E22-900T22D; UART TX 16/RX 17 on Serial2)
-   - `OneWire` / `DallasTemperature` (DS18B20)
-   - `DFRobot_EC` / `DFRobot_pH` (DFRobot sensors)
-3. Configure the radio settings identically on every node (915 MHz, SF9–12, matching bandwidth/coding rate/sync word). Record the configured output/EIRP and confirm NTC type-approval for the 915 MHz SRD band.
-4. WiFi stays **off** on the float node; only the house bridge joins the network.
-5. Upload the firmware to each ESP32. Implement the device-ID/sequence/CRC-8 packet, ACK/NAK, 60-second heartbeat, immediate DO emergency uplink, and 5-minute MANUAL auto-revert before any life-support test.
-
-### Dashboard Configuration
-
-1. **Create the back end** — a Firebase project with the **Realtime Database** (live telemetry) and Firebase Auth for the farmer accounts.
-2. **Deploy the webapp** — a Next.js app on Vercel's free tier (or Firebase Hosting), with the service-account values set as env vars: `FIREBASE_DATABASE_URL`, `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`.
-3. **Connect the uplinks** — the house bridge node relays each float packet into the Realtime Database (`devices/<id>/state`), where the webapp's `onValue()` listeners stream it straight to the UI.
-4. **Build the control panel** — live readings, pump state, the AUTO/MANUAL/OFF selector, per-pump overrides and alert thresholds; a route handler writes the command into the Realtime Database where the house bridge polls it and relays it down over LoRa.
+Full guide: [`docs/SETUP.md`](docs/SETUP.md).
 
 ---
 
 ## Project Structure
 
 ```
-crab-grid-smart-aeration/
-├── README.md              # This file — start here
-├── LICENSE                # MIT License
-├── .gitignore
-├── docs/                   # Documentation and builder guides
-│   ├── Components.md      # Engineering specs and validation rationale
-│   ├── HARDWARE.md        # Hardware guide (specs, pin map, BOM mirror)
-│   ├── BOM.md             # Bill of Materials — prices, product links, ratings
-│   ├── SETUP.md           # Environment, accounts and first power-up
-│   ├── WIRING.md          # Assembly, wiring and verified ESP32 pin map
-│   ├── FIRMWARE.md        # Firmware architecture and packet protocol
-│   ├── TESTING.md         # Test plan and acceptance criteria
-│   ├── CALIBRATION.md     # Sensor calibration procedures
-│   ├── TROUBLESHOOTING.md # Fault isolation guide
-│   ├── APP.md             # Dashboard webapp specification
-│   ├── SYSTEM-ARCHITECTURE.md # Thesis system architecture diagram (Mermaid)
-│   ├── BLOCK-DIAGRAM.md   # Thesis hardware block diagram (Mermaid)
-│   ├── FLOWCHART.md       # Thesis operational flowchart (Mermaid)
-│   ├── STACKS.md          # Technology stack reference
-│   └── images/            # planned
-├── firmware/              # planned — ESP32 source code
-│   ├── main_controller/  # planned — ESP32+E22-900T22D sensor + LoRa firmware
-│   ├── house_bridge/     # planned — LoRa ⇄ WiFi relay node firmware
-│   └── camera_node/      # planned — ESP32-CAM-MB streaming firmware
-└── dashboard/            # planned — Next.js + Realtime Database webapp
-
-Items marked "planned" are not yet in the repository — create each item as its roadmap phase completes.
+salimango/
+├── README.md                     # This file
+├── perfboard_build_guide.pdf     # Authoritative perfboard pin map and wiring
+├── salinity_rev.md               # Bilge / salinity-correction rule (source of the AUTO logic)
+├── PRD.md                        # Revision requirements
+├── firmware/
+│   ├── README.md                 # Upload guide
+│   ├── salimango_node/           # The ESP32 program (config.h = the only pin map)
+│   └── tests/host/               # Host unit tests for formulas and control rules
+├── web/                          # React dashboard (Vite + TypeScript)
+│   ├── src/                      # App, components, hooks, lib
+│   ├── scripts/                  # provision-device.mjs, simulate-device.mjs
+│   └── tests/                    # Database (PGlite), library and UI tests
+├── supabase/migrations/          # Database schema, RLS, functions
+├── docs/                         # Builder and thesis documentation, CHANGELOG
+├── DOSENSE/, ph sense/, salinity sense/   # Earlier bench sketches (reference; see each README)
+├── model/                        # Fusion 360 model and renders
+├── wiring/                       # CirKit project (not updated for this revision)
+└── LICENSE
 ```
 
 ---
 
-## Compatibility Notes
+## Implementation Status
 
-All system-level checks, with their verdicts, are in [`docs/BOM.md`](docs/BOM.md). The following gates still need action before deployment:
+| Item | Status |
+|------|--------|
+| Supabase schema, RLS, device/browser RPCs | Implemented and tested (PGlite) — not yet run on a live project |
+| React dashboard (two required tabs + Settings & Data, QR/code access, Filipino/English, charts, CSV) | Implemented and tested (build, lint, jsdom tests) — not yet tried on a live deployment |
+| Firmware build, formulas and control rules | Implemented and tested (compiles; host tests) |
+| Firmware on the assembled board (sensors, relays, selector, Wi-Fi, Supabase) | Implemented but unverified |
+| Physical calibration of pH, EC, DO | Pending (procedures in `docs/CALIBRATION.md`) |
+| Relay module 3.3 V logic compatibility | Pending measurement |
+| Alternating duty of the two air pumps | Not implemented (both run together, per the team) |
+| LoRa link and house bridge | Deferred |
+| Camera | Removed |
 
-| Open item | Action |
-|-----------|--------|
-| Camera is WiFi-only (video cannot fit LoRa) | Use its own AP during pond visits, run it at the house with the bridge node, or fit an LTE camera |
-| No affordable NH₃ sensor | pH + temperature can estimate the toxic fraction/risk only; absolute NH₃ requires measured TAN or a laboratory test |
-| PH-4502C outputs up to 5V | Use 10 kΩ series + 18 kΩ shunt for the minimum divider, or an ADS1115 for better precision |
-| No on-site battery | Alert on heartbeat loss at the house bridge; confirm the house inverter stays on 24/7; add a small 12V UPS or supercapacitor if a last-gasp packet or unattended-night runtime is required |
-| Control needs internet, hosting and the bridge node | Local selector as fail-safe; MANUAL auto-reverts to AUTO after 5 minutes; emergency sensor events bypass the polling interval; ACK/NAK confirms commands |
+---
+
+## Known Limitations
+
+| Limitation | Consequence |
+|-----------|-------------|
+| K = 1 EC probe reads only to ≈ 18 mS/cm (≈ 11 ppt) | The 28–32 ppt target band shows *over range*; the bilge treats it as "not low" |
+| Shared sticker code | Anyone who sees the sticker can view and control the pond until the code is rotated |
+| One DO probe | Single point of failure; cross-check with the DO9100 meter |
+| No measured TAN | Ammonia is shown as a toxic fraction, not a concentration |
+| Wi-Fi must reach the float | Otherwise the node runs locally and the dashboard shows stale data |
+| Emerson (1975) is a fresh-water equilibrium | Slight overestimate of the NH₃ fraction in brackish water |
 
 ---
 
 ## Roadmap
 
-- [x] Concept definition and documentation
-- [x] Component selection and BOM verification
-- [ ] Phase 1: Bench testing with ESP32 + E22-900T22D + basic sensors
-- [ ] Phase 2: House bridge node integration and remote dashboard
-- [ ] Phase 3: Power to the float (AC drop from household solar + 12V DC supply)
-- [ ] Phase 4: Full feature set (DO, pH, camera, boxes)
-- [ ] NTC/Philippine Electrical Code sign-off and licensed-electrician commissioning
-- [ ] Field testing in mangrove environment
-- [ ] System validation
+- [x] Concept, component selection, BOM
+- [x] Perfboard build guide
+- [x] Firmware, Supabase backend and React dashboard (revision 2026-10)
+- [ ] Deploy Supabase + Vercel; provision and print the sticker
+- [ ] Bench tests on the assembled board ([`docs/TESTING.md`](docs/TESTING.md))
+- [ ] Sensor calibration and cross-checks
+- [ ] Licensed-electrician commissioning of the AC drop
+- [ ] Field pilot without crabs, then stocked deployment
+- [ ] Future phase: LoRa link for sites beyond Wi-Fi range
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request or open an Issue.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
+Contributions are welcome. Fork, create a feature branch, commit, and open a Pull Request.
 
 ## License
 
-Distributed under the MIT License. See [`LICENSE`](LICENSE) for more information.
-
----
+Distributed under the MIT License. See [`LICENSE`](LICENSE).
 
 ## Contact
 
-**QPPD** — [github.com/qppd](https://www.github.com/qppd)
-
-Project Link: [https://github.com/qppd/crab-grid-smart-aeration](https://github.com/qppd/crab-grid-smart-aeration)
-
----
-
-<div align="center">
-
-**Built with love for sustainable aquaculture**
-
-</div>
+**QPPD** — [github.com/qppd](https://www.github.com/qppd) ·
+Project: [github.com/qppd/crab-grid-smart-aeration](https://github.com/qppd/crab-grid-smart-aeration)

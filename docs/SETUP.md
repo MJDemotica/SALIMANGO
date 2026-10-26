@@ -2,109 +2,135 @@
 
 **Project:** Solar Automated LoRa-Integrated Mud Crab Aeration Network with Crab Grid Observation
 
-This guide takes a builder from an empty desk to a powered, flashing, cloud-connected system. Follow it in order: software first (free), then hardware per the phased budget in [`BOM.md`](BOM.md), then first power-up on the bench.
+From an empty desk to a float node reporting to the dashboard. Order: tools → Supabase → Vercel →
+provision the device → flash the ESP32 → first power-up.
 
-## 1. Builder Pack Map
+## 1. Builder pack map
 
 | File | Use it when |
 |------|-------------|
-| [`SETUP.md`](SETUP.md) (this file) | Installing tools, creating Firebase/Vercel accounts, first power-up |
-| [`HARDWARE.md`](HARDWARE.md) | Component specifications and validation rationale |
-| [`WIRING.md`](WIRING.md) | Assembling the float, wiring, and the verified ESP32 pin map |
-| [`FIRMWARE.md`](FIRMWARE.md) | Firmware architecture, pin map, and packet protocol |
-| [`TESTING.md`](TESTING.md) | Running the test plan and recording results |
-| [`CALIBRATION.md`](CALIBRATION.md) | Calibrating pH, EC, DO, and temperature probes |
-| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Diagnosing power, boot, LoRa, sensor, and dashboard faults |
-| [`APP.md`](APP.md) | Dashboard webapp features, schema, and safety interlocks |
+| [`SETUP.md`](SETUP.md) (this file) | Accounts, deployment, provisioning, first power-up |
+| [`WIRING.md`](WIRING.md) | Perfboard pin map, wiring, continuity checks |
+| [`../firmware/README.md`](../firmware/README.md) | Uploading the firmware |
+| [`FIRMWARE.md`](FIRMWARE.md) | Control rules, telemetry and command contract |
+| [`APP.md`](APP.md) | Dashboard behaviour, access and security, data model |
+| [`CALIBRATION.md`](CALIBRATION.md) | pH, EC, DO procedures |
+| [`TESTING.md`](TESTING.md) | Automated tests and the hardware test plan |
+| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Fault finding |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in this revision and what is still unverified |
 
-## 2. Prerequisites
+## 2. Tools
 
-- Basic electronics skill: soldering, crimping, multimeter use.
-- Tools: multimeter, soldering iron, wire strippers, crimpers, heat gun, screwdrivers, cable ties.
-- **Safety gate:** all 220 V AC work (shore-end RCD, breaker, outdoor run) is a licensed-electrician job under the Philippine Electrical Code. Builders work only on the 12 V DC side.
+- **Node.js 20 or newer** and **Git**.
+- **Arduino IDE 2** with **esp32 by Espressif** (tested with 3.3.12) and the libraries **OneWire**,
+  **DallasTemperature**, **ArduinoJson 7**.
+- CH340 or CP210x USB driver for the ESP32 DevKit.
+- In `web/`: `npm install`.
 
-## 3. Hardware Ordering
+**Safety gate:** all 220 V AC work (shore-end RCD, breaker, outdoor run) is a licensed-electrician job
+under the Philippine Electrical Code. Builders work only on the 12 V / 5 V DC side.
 
-Order by phase so cash flow matches the project timeline (prices and links in [`BOM.md`](BOM.md)):
+## 3. Supabase
 
-| Phase | Contents | Rough cost |
-|-------|----------|-----------|
-| 1 — Bench | 2 × ESP32 + E22/antenna, DS18B20, relay module, 1 bilge pump, selector | ₱2,906 |
-| 2 — Dashboard | House bridge parts, EC sensor, refractometer, EC standards | ₱7,127–7,727 |
-| 3 — Power | AC drop, RCD + breaker, 12 V 30 A PSU, LM2596S module, fuses, glands | ₱3,127–4,969 |
-| 4 — Full set | DO, pH, camera, boxes, floats, frame, pipe grid, air pumps, salinity-test set | ₱34,850–46,400 |
+1. Create a project at [supabase.com](https://supabase.com).
+2. **SQL Editor** → paste the whole of
+   [`supabase/migrations/20261026000000_salimango_initial.sql`](../supabase/migrations/20261026000000_salimango_initial.sql)
+   → **Run**. (With the Supabase CLI, after `supabase link`, `supabase db push` applies the files in
+   `supabase/migrations/`.) This creates the tables, row-level security, functions and the Realtime
+   publication.
+3. **Authentication → Sign In / Providers → Allow anonymous sign-ins: on.** The dashboard has no login
+   page; every browser gets an anonymous session. Optionally enable CAPTCHA protection.
+4. **Project Settings → API:** note the **Project URL** and the **anon / publishable key**. The
+   **service_role** key stays on your own computer (provisioning only).
 
-## 4. Software Installation
+## 4. Vercel (dashboard)
 
-1. Install **Arduino IDE 2.x** or **VS Code + PlatformIO** (PlatformIO recommended for multi-node builds).
-2. Add the ESP32 board package. In Arduino IDE, File > Preferences > Additional Board Manager URLs:
-   `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
-   then Boards Manager > install **esp32 by Espressif**.
-3. Install the USB-serial driver for your devkit (**CH340** or **CP210x**) and confirm a COM port appears.
-4. Install libraries (Library Manager or PlatformIO registry):
+1. Push the repository to GitHub and **Import** it in Vercel.
+2. **Root Directory: `web`** (framework preset Vite; `web/vercel.json` sets the build and SPA routing).
+3. Environment variables (Production and Preview):
 
-| Library | Used by | Purpose |
-|---------|---------|---------|
-|| `EBYTE` | float node, bridge | UART LoRa module control library for the E22-900T22D |
-| `OneWire` + `DallasTemperature` | float node | DS18B20 probes |
-| `DFRobot_EC`, `DFRobot_pH` | float node | EC and pH conversion with calibration |
-| `Firebase Arduino Client Library for ESP8266/ESP32` (Mobizt) | house bridge | RTDB REST/realtime writes |
+| Variable | Value |
+|----------|-------|
+| `VITE_SUPABASE_URL` | Supabase Project URL |
+| `VITE_SUPABASE_ANON_KEY` | Supabase anon / publishable key |
 
-5. Install **Node.js LTS** and **Git** for the dashboard work.
+Never add the service_role key to Vercel: every `VITE_` variable is shipped to the browser.
 
-## 5. Firebase Project
+4. Deploy, and note the site address (for example `https://salimango.vercel.app`). Opening it should
+   show the access-code page.
 
-1. Create a project at console.firebase.google.com (Analytics off is fine).
-2. Build > **Realtime Database** > Create database > start in locked mode.
-3. Build > **Authentication** > enable **Email/Password** and create the farmer account(s).
-4. Deploy database rules (Auth-only; the bridge connects server-side with its own credentials):
+Local development: copy `web/.env.example` to `web/.env.local`, fill in the same two values, then
+`npm run dev`.
 
-```json
-{
-  "rules": {
-    ".read": "auth != null",
-    ".write": "auth != null"
-  }
-}
+## 5. Provision a device (access code, QR sticker, device token)
+
+From `web/` (once per float node):
+
+```
+npm run provision -- --name "Float node 1" --url https://salimango.vercel.app --sql
 ```
 
-5. Project settings > Service accounts > **Generate new private key** — keep the JSON file out of the repository; it feeds the dashboard env vars below.
+Copy the printed `select public.admin_register_device(...)` line into the Supabase SQL Editor, run it,
+then clear the editor (it contains secrets). Alternatively, set `SUPABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY` in the terminal and run the command without `--sql`.
 
-## 6. Dashboard Deployment
+Output in `web/provisioning/<CODE>/` (git-ignored, keep private):
 
-1. Push the repo to GitHub, then import it in **Vercel** (Hobby tier) or deploy via Firebase Hosting.
-2. Set the environment variables exactly as named:
+| File | Use |
+|------|-----|
+| `sticker-qr.svg` | Print as the sticker on the house-node enclosure |
+| `README.txt` | The access code to print under the QR, and how to replace it |
+| `secrets.h` | The `DEVICE_TOKEN` line for the firmware |
 
-| Env var | Value |
-|---------|-------|
-| `FIREBASE_DATABASE_URL` | `https://<project>-default-rtdb.firebaseio.com` |
-| `FIREBASE_PROJECT_ID` | Firebase project ID |
-| `FIREBASE_CLIENT_EMAIL` | Service-account email |
-| `FIREBASE_PRIVATE_KEY` | Private key from the JSON (keep the `\n` escapes) |
+Running the command again creates a **second** device with new codes; it does not update the first.
 
-3. Deploy and open the site; confirm the app boots with "waiting for device data" and no permission errors.
+### Replacing a leaked code
 
-## 7. Node Configuration
+Anyone with the code can view and control the pond. If the sticker was copied by someone who should not
+have it, generate a new code (e.g. run the provisioning script once with `--sql` and keep only the new
+code from its output, or choose any 8 Crockford base-32 characters), then run in the SQL Editor:
 
-Edit `firmware/<node>/config.h` before flashing (see [`FIRMWARE.md`](FIRMWARE.md) §9):
+```sql
+select public.admin_rotate_access_code('<device id>', '<NEW-CODE>');
+```
 
-- `DEVICE_ID`: float node = 1, house bridge = 2.
-- Radio settings must be **identical on every node**: 915.0 MHz, SF9, BW 125 kHz, CR 4/5, sync word 0x3444, CRC on.
-- WiFi stays **off** on the float node; only the house bridge joins the network.
-- The camera node is configured separately ([`FIRMWARE.md`](FIRMWARE.md) §10): AP mode, no LoRa.
+Every phone that used the old code loses access; print a new sticker. Device token compromise:
+`admin_rotate_device_token('<device id>', '<new 32+ character token>')`, then update `secrets.h` and
+re-flash.
 
-## 8. First Power-Up Checklist (bench only)
+## 6. Flash the ESP32
 
-1. **Attach the 915 MHz antenna before powering any radio node.** Transmitting without an antenna destroys the PA.
-2. Feed the float node from a current-limited 12 V bench supply first — never from mains on the first spin.
-3. Verify rails with a multimeter: 12 V ±5% at the PSU output, 5 V ±5% at the LM2596S/buck, 3.3 V ±5% at the ESP32 3V3 pin.
-4. Confirm the relay module shows all channels OFF at boot (external pull-ups fitted — see [`WIRING.md`](WIRING.md) §5).
-5. Flash the float node; watch the serial log for sensor init and the first LoRa uplink.
-6. Flash the bridge; confirm the uplink lands in Firebase and appears on the dashboard.
-7. Press the RCD test button monthly once the AC side is commissioned by the electrician.
+Follow [`../firmware/README.md`](../firmware/README.md): create `firmware/salimango_node/secrets.h`
+(Wi-Fi, Supabase URL, anon key, device token), select **ESP32 Dev Module**, upload, check the Serial
+Monitor (`status`).
 
-## 9. Next Steps
+The float node joins the **house Wi-Fi directly** (2.4 GHz). Check the signal at the float before
+deployment; an outdoor repeater or access point may be needed. Without Wi-Fi the node keeps sensing and
+controlling locally.
 
-- Run the bench test matrix in [`TESTING.md`](TESTING.md).
-- Calibrate every probe with [`CALIBRATION.md`](CALIBRATION.md) before trusting any reading.
-- Keep [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) next to the bench.
+## 7. First power-up (bench)
+
+1. Run the perfboard continuity checklist ([`WIRING.md`](WIRING.md) §8) with the ESP32 removed.
+2. Pumps disconnected; ESP32 on laptop USB only. The firmware switches the air pumps **on at boot**.
+3. Flash; confirm in the Serial Monitor: DS18B20 found, calibration lines, `[event:boot]`, then
+   `status` shows `Supabase ok`.
+4. Open the dashboard via the QR code: **Live**, values on all five cards (or an explained status).
+5. Selector through M, O, A: the dashboard's "Selector on the box" follows.
+6. Feed the 12 V supply from a current-limited bench supply; connect pumps in buckets; test each relay
+   in MANUAL ([`TESTING.md`](TESTING.md) ACT-01).
+7. Calibrate pH, EC and DO ([`CALIBRATION.md`](CALIBRATION.md)) before trusting any reading.
+8. Mains last, after the electrician's sign-off; press the RCD test button monthly.
+
+## 8. Trying the dashboard without hardware
+
+With a provisioned device token:
+
+```
+cd web
+$env:SUPABASE_URL = "https://<ref>.supabase.co"; $env:SUPABASE_ANON_KEY = "<anon key>"; $env:DEVICE_TOKEN = "<token>"
+npm run simulate
+```
+
+(PowerShell syntax; in bash use `SUPABASE_URL=... npm run simulate`.) The simulator reports random-walk
+values flagged **simulated**; the dashboard shows a red SIMULATED DATA banner and the CSV marks every
+row. Use a separate test device for this, so simulated rows never mix with pond data.

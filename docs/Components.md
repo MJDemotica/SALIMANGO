@@ -2,6 +2,8 @@
 
 **Project:** Solar Automated LoRa-Integrated Mud Crab Aeration Network with Crab Grid Observation
 
+> **Current phase (Oct 2026 revision):** ESP32 → house Wi-Fi → Supabase → React dashboard. The camera is removed, LoRa and the house bridge are deferred, and the EC probe is the DFRobot DFR0300 with **K = 1**. Rows changed for this revision are marked *(rev. 2026-10)*; see [`CHANGELOG.md`](CHANGELOG.md).
+
 > Every count and specification below was **validated against web sources on Sept 2026** — SEAFDEC/AQD (Philippines) mud crab culture standards, FAO mud crab manual, DFRobot sensor datasheets, and Shopee/Lazada PH listings. Rationale for each correction is stated inline; see [`BOM.md`](BOM.md) for the verified product links.
 
 ---
@@ -22,43 +24,38 @@
 
 | Component | Spec / Count | Validated? | Purpose / Notes |
 |-----------|--------------|-----------|-----------------|
-|| Controller | **ESP32 DevKit (38-pin, ESP32-WROOM-32) + EBYTE E22-900T22D (SX1262, 915 MHz, 22 dBm)**, centred in the setup, IP65 enclosure | OK with compliance gate | Runs automation logic; links sensors, pumps, and the LoRa point-to-point link. WiFi stays off on the float. UART interface (TX/RX only) — simplified wiring compared to SPI modules. Built-in SMA antenna connector. ~₱600–800 ea. 915 MHz is the Philippine NTC licence-free SRD band; confirm EIRP/type-approval before deployment. |
-| Water Quality Sensors | 4 sensor types: EC/salinity (K=10), pH, dissolved oxygen (**one probe**), temperature (2× DS18B20 probes) | Validated ranges with limits | **EC K=10 (0–100 mS/cm)** covers the conductivity range around seawater (35 ppt is approximately 53 mS/cm at 25 °C), but salinity must use the manufacturer/PSS-78 conversion, not a fixed linear ppt factor. **pH E-201-C** covers the 7.5–8.5 brackish target. **DO galvanic probe (SEN0237-A)** supports the ≥5 ppm target, but one probe is a single-point failure; provide flow across the membrane, a handheld backup, and spare membrane/electrolyte. DS18B20 covers the 27–30 °C band. |
-|| LoRa ⇄ WiFi Bridge | **A second ESP32 DevKit + E22-900T22D (915 MHz) at the house** where WiFi/internet exists — the "bridge node" | **Replaced LoRaWAN gateway (Sept 2026)** | The ₱10,645 LoRaWAN gateway is gone. The bridge receives float uplinks and pushes them into the Firebase webapp; queued commands are pulled from the webapp and sent back down over LoRa — plain point-to-point radio, no TTN/ChirpStack server. E22-900T22D delivers +22 dBm on the 915 MHz SRD band (~5 km range). The 1–3 km LOS estimate is a test target, not a regulatory guarantee; confirm NTC type-approval and measured EIRP before deployment. |
-| Aerator | **2 × RESUN MPQ-903 (MPQ-03) 12V DC electromagnetic air pump — 35W, 68 L/min open-flow, 0.068 MPa, ~3.5A, 6 outlets** (NOT 2× mini aquarium pumps) | **Corrected** | Mini pumps (~0.5–2 L/min each) cannot aerate 8 cages. The biological target is 1.5–2 L/min per 100 L, so 8 cages × ~40 L ≈ 320 L needs about **4.8–6.4 L/min delivered total** (roughly 0.6–0.8 L/min per cage). The 68 L/min MPQ-03 is deliberately far above the target to cover depth, tubing and stone losses; run ONE unit on duty with the second on N+1 standby (alternating duty), and use a manifold, needle valves and per-branch flow measurement so excess air is not dumped into the cages. |
+| Controller *(rev. 2026-10)* | **ESP32 DevKit (38-pin, ESP32-WROOM-32)** on the perfboard (`perfboard_build_guide.pdf`), centred in the setup, IP65 enclosure | OK | Runs all sensing, calibration and control locally and reports to Supabase over the **house Wi-Fi** (2.4 GHz). The perfboard keeps an empty E22-900T22D socket on GPIO16/17 for a future LoRa phase. Check the Wi-Fi signal at the float before deployment. |
+| Water Quality Sensors *(rev. 2026-10)* | 4 sensor types: EC/salinity (**DFR0300, K = 1**), pH, dissolved oxygen (**one probe**), temperature (DS18B20 on one 1-Wire bus; a second probe is optional) | Validated ranges with limits | **EC K = 1 (team-confirmed probe):** DFRobot range 0–20 mS/cm; on the ESP32 ADC reliable to about 18 mS/cm ≈ **11 ppt at 25 °C**. The 28–32 ppt target (≈ 43–50 mS/cm) is **above this probe's range**: such readings are reported as *over range*, not as a number. Salinity uses PSS-78 from conductivity and temperature, not a fixed factor (35 ppt ≈ 53 mS/cm at 25 °C). **pH E-201-C** covers the 7.5–8.5 brackish target. **DO galvanic probe (SEN0237-A)** supports the ≥5 ppm target, but one probe is a single-point failure; provide flow across the membrane, a handheld backup, and spare membrane/electrolyte. DS18B20 covers the 27–30 °C band. |
+| LoRa ⇄ WiFi Bridge — **deferred (rev. 2026-10)** | **A second ESP32 DevKit + E22-900T22D (915 MHz) at the house** where WiFi/internet exists — the "bridge node" | **Not used in the current phase**; kept as the option for sites where the house Wi-Fi does not reach the float. Previous design: replaced the LoRaWAN gateway (Sept 2026) | The ₱10,645 LoRaWAN gateway is gone. The bridge would receive float uplinks and push them to the backend (Firebase in the old design; Supabase now); queued commands are pulled from the webapp and sent back down over LoRa — plain point-to-point radio, no TTN/ChirpStack server. E22-900T22D delivers +22 dBm on the 915 MHz SRD band (~5 km range). The 1–3 km LOS estimate is a test target, not a regulatory guarantee; confirm NTC type-approval and measured EIRP before deployment. |
+| Aerator | **2 × RESUN MPQ-903 (MPQ-03) 12V DC electromagnetic air pump — 35W, 68 L/min open-flow, 0.068 MPa, ~3.5A, 6 outlets** (NOT 2× mini aquarium pumps) | **Corrected** | Mini pumps (~0.5–2 L/min each) cannot aerate 8 cages. The biological target is 1.5–2 L/min per 100 L, so 8 cages × ~40 L ≈ 320 L needs about **4.8–6.4 L/min delivered total** (roughly 0.6–0.8 L/min per cage). The 68 L/min MPQ-03 is deliberately far above the target to cover depth, tubing and stone losses; the earlier plan was one unit on duty with the second on N+1 standby (alternating duty). *(rev. 2026-10)* The current firmware runs **both** pumps when DO is low (K1, then K5 5 s later; off together), per the team; alternating duty is not implemented. Use a manifold, needle valves and per-branch flow measurement so excess air is not dumped into the cages. |
 | Air stones / tubing | 8–10 × air stones + 20 m 4 mm silicone tubing + gang valve manifold | Added | Distributes air from the 2 pumps into each of the 8 cages. |
 | Circulation / Flush Pump | **2 × 12V Marine Bilge Pump 1100 GPH** (submersible) | **Function corrected** | Provides circulation/flushing and can support a controlled salinity experiment. It does not reliably correct salinity in open slotted cages because tidal exchange flushes the dose and dense brine sinks. Use isolation sleeves or a closed-loop/RAS enclosure for a defensible salinity-control test; verify pump current against the relay and fuse rating. |
-| Relay Module | **8-channel**, 12V coil, optocoupler, low-level trigger | Chosen | 2 air pumps + 2 bilge pumps = 4 loads, so a 4-ch board would leave zero expansion; 8-ch covers every actuator path plus spares. |
-| Camera | Overhead, one unit initially (optional, ESP32-CAM-MB) — **first thing to cut if the build passes ₱50,000** | OK | Monitor molting, deter predators, spot poachers. WiFi-only — see BOM Compatibility #3. |
-| Control Interface | **Local rotary selector (AUTO / OFF / MANUAL)** + status LEDs at the controller box, plus webapp control | The LoRa link is polled point-to-point — a command lands only on the next uplink — so a local selector is the fail-safe for a life-support load. Mode and pump state are echoed in every uplink. |
-| Dashboard / Webapp | **Next.js + Firebase Realtime Database + Auth**, free-tier hosting (Vercel) | Live readings, AUTO/MANUAL/OFF, per-pump overrides, thresholds. RTDB's `onValue()` sync is a natural fit for telemetry: keep live state in one node and trim the history log so it stays inside the free tier. |
-| Power Source | **220V AC drop from the household solar system** (array + battery bank **> 600 Ah** + inverter, available 24/7) + **12V 30 A DC supply** on the float | **Corrected** | The site already sits on a household solar installation with a battery bank over 600 Ah, so panels, MPPT and an on-site battery are unnecessary. Night aeration is a planning estimate of 1 × MPQ-03 (35 W) on duty + node 1.5 W + bilge duty ≈ 40–60 W ≈ **480–720 Wh/night ≈ 3.5–5 A at 12V**; verify inverter efficiency and actual duty cycle. On-site work is only a shore-end 30 mA RCD + earthed outdoor AC run + 12V 30 A PSU (see BOM §4), installed and commissioned by a licensed electrician. With no on-site battery, the AC drop is the single point of failure; the house bridge must alarm on heartbeat loss. |
+| Relay Module *(rev. 2026-10)* | **8-channel**, optocoupler, low-level trigger; the module in use is **5 V (SRD-05VDC)** (BOM listing says 12 V coil) | Chosen | 2 air pumps + 2 bilge pumps = 4 loads. Channels used: **K1** air pump 1, **K5** air pump 2 (K2 has a defective terminal; its lead moved to IN5), **K3** bilge 1, **K4** bilge 2. Verify each relay is fully off with a 3.3 V input ([`WIRING.md`](WIRING.md) §6). |
+| Camera — **removed (rev. 2026-10)** | ESP32-CAM-MB overhead camera | Not pursued | Removed from the current design (no firmware, dashboard page or power budget). Previous purpose: monitor molting, deter predators, spot poachers. |
+| Control Interface *(rev. 2026-10)* | **Local M-O-A rotary selector (INScom LW28-20A)** + onboard status LED, plus dashboard control | The selector is the local authority for a life-support load: at M or O it overrides the dashboard; at A the dashboard chooses AUTO / MANUAL / OFF. Mode and relay states are reported every 10 s. |
+| Dashboard / Webapp *(rev. 2026-10)* | **React (Vite) on Vercel + Supabase** (PostgreSQL, Realtime, anonymous Auth) | Replaces Next.js + Firebase. Access by QR sticker or typed code (no login). Live readings, AUTO/MANUAL/OFF, pumps, calibration, salinity settings, charts, CSV export ([`APP.md`](APP.md)). |
+| Power Source | **220V AC drop from the household solar system** (array + battery bank **> 600 Ah** + inverter, available 24/7) + **12V 30 A DC supply** on the float | **Corrected** | The site already sits on a household solar installation with a battery bank over 600 Ah, so panels, MPPT and an on-site battery are unnecessary. Night aeration is a planning estimate of 1 × MPQ-03 (35 W) on duty + node 1.5 W + bilge duty ≈ 40–60 W ≈ **480–720 Wh/night ≈ 3.5–5 A at 12V**; verify inverter efficiency and actual duty cycle. On-site work is only a shore-end 30 mA RCD + earthed outdoor AC run + 12V 30 A PSU (see BOM §4), installed and commissioned by a licensed electrician. With no on-site battery, the AC drop is the single point of failure; a power loss shows on the dashboard as stale data and a `boot` event when power returns *(rev. 2026-10: there is no house bridge to alarm)*. |
 
-### Controller pin map — ESP32 38-pin DevKit (WiFi/boot-safe)
+### Controller pin map — ESP32 38-pin DevKit *(rev. 2026-10)*
 
-> Validated for the ESP32-WROOM-32 DevKit (Makerlab PH, ₱349). Rules: **no analog on ADC2** (GPIO 0/2/4/13/15/25/27 stop working as analog while WiFi runs), **no actuators on boot-strapping pins** (GPIO 0, 2, 12 and 15 glitch or break boot), **UART0 (GPIO 1/3) kept free** for flashing and logs. The float node never enables WiFi and the house bridge reads no analog, but the map is safe under both configurations. UART interface (TX/RX on Serial2) replaces SPI — no BUSY/DIO1/NSS pins needed.
+The authoritative pin map is [`perfboard_build_guide.pdf`](../perfboard_build_guide.pdf), reproduced
+with wire numbers and suitability checks in [`WIRING.md`](WIRING.md) §3–§5 and defined in firmware only
+in `firmware/salimango_node/config.h`.
 
-|| Function | GPIO | Why it's safe |
-||-----------|------|---------------|
-|| LoRa E22-900T22D TX (Serial2) | 16 | Free digital pin; UART output. Safe |
-|| LoRa E22-900T22D RX (Serial2) | 17 | Free digital pin; UART input. Safe |
-|| LoRa E22-900T22D M0 | NC | Leave floating — default transparent mode |
-|| LoRa E22-900T22D M1 | NC | Leave floating — default transparent mode |
-| DS18B20 ×2 (shared 1-Wire bus) | 19 | Free digital pin; external 4.7 kΩ pull-up to 3.3 V |
-| pH analog output (via 10 kΩ series + 18 kΩ shunt divider, or ADS1115) | 34 | **ADC1** — works with WiFi on; input-only pin. 5 V → about 3.21 V with the passive divider; use a common ground and, preferably, an external 16-bit I2C ADC for professional-grade pH. |
-| EC/salinity analog output | 35 | **ADC1** — input-only |
-| DO sensor analog output | 36 (VP) | **ADC1** — input-only |
+| Function | GPIO |
+|----------|------|
+| pH (via 10 kΩ / 20 kΩ divider as built; the guide lists 18 kΩ) | 34 (ADC1) |
+| EC (DFR0300, K = 1) | 35 (ADC1) |
+| DO (SEN0237-A) | 36 / VP (ADC1) |
+| DS18B20 1-Wire (4.7 kΩ pull-up) | 19 |
+| Relay K1 air pump 1 / K5 air pump 2 / K3 bilge 1 / K4 bilge 2 | 25 / 27 / 33 / 13 (10 kΩ pull-ups) |
+| Selector M / A (10 kΩ pull-ups) | 4 / 21 |
+| Onboard status LED | 2 |
+| E22 RXD / TXD (LoRa, deferred, not fitted) | 17 / 16 |
 
-| Relay 1 — air pump 1 | 25 | Non-strapping output; firmware drives HIGH (relay OFF) before init |
-| Relay 2 — air pump 2 | 27 | Same (digital output — the ADC2 restriction affects analog reads only) |
-| Relay 3 — bilge pump 1 | 33 | Non-strapping output; same boot practice |
-| Relay 4 — bilge pump 2 | 13 | ADC2 pin, but only its **analog** function is WiFi-blocked — digital output is unaffected |
-| Rotary selector bit A (AUTO/MANUAL) | 4 | Input with external 10 kΩ pull-up to 3.3 V; selector shorts to GND. GPIO 4 is ADC2-capable but is used only as a digital input. |
-| Rotary selector bit B (AUTO/OFF) | 21 | Input with external 10 kΩ pull-up to 3.3 V; selector shorts to GND. |
-| Mode LED (external) | 22 | Output |
-| Link/status LED | 2 (onboard LED) | The devkit's boot LED doubles as the link indicator |
-
-**Leave unconnected:** GPIO 0 (boot strapping — low at reset = flash mode), GPIO 12 (HIGH at boot = flash-voltage fault → boot failure), GPIO 15 (boot strapping), GPIO 1/3 (USB serial). Relay modules are low-level trigger: drive the GPIO HIGH before initializing the pins, keep the relay off at boot, and add an external 10 kΩ pull-up to 3.3 V on each used relay input if the module does not already provide a reliable pull-up. The house bridge uses the same UART wiring (TX/RX on Serial2) — no SPI pins needed.
+Earlier revisions of this table listed LoRa on Serial2 as "TX 16 / RX 17", a mode LED on GPIO22 and a
+selector decoding (AUTO = both HIGH) that does not match the bench-tested switch; see
+[`WIRING.md`](WIRING.md) §7 for every resolved discrepancy.
 
 ---
 
@@ -69,10 +66,10 @@ From **SEAFDEC/AQD (Philippines)** mud crab culture standards:
 | Parameter | Target / Safe Range | Sensor |
 |-----------|--------------------|--------|
 | Dissolved Oxygen | **≥ 5 ppm** | DFRobot SEN0237-A galvanic DO probe |
-| Salinity | **28–32 ppt** (grow-out tolerates 10–34 ppt) | DFRobot EC K=10 (0–100 mS/cm); convert with the manufacturer/PSS-78 method. At 25 °C, 35 ppt seawater is approximately 53 mS/cm; do not treat 12.88 mS/cm as 35 ppt. |
-| Temperature | **27–30 °C** | 2× DS18B20 stainless waterproof probes |
+| Salinity | **28–32 ppt** (grow-out tolerates 10–34 ppt) | DFRobot DFR0300 EC, **K = 1** (reliable to ≈ 11 ppt on the ESP32; the target band is above its range); PSS-78 conversion. At 25 °C, 35 ppt seawater is approximately 53 mS/cm; do not treat 12.88 mS/cm as 35 ppt. |
+| Temperature | **27–30 °C** | DS18B20 stainless waterproof probe (second probe optional) |
 | pH | **7.5–8.5** | E-201-C electrode + PH-4502C board |
-| NH₃ (unionized) | **Cannot be calculated from pH + temperature alone**. pH + temperature estimate the toxic fraction/risk; absolute NH₃ requires measured Total Ammonia Nitrogen (TAN) or a laboratory test. | derived risk indicator only |
+| NH₃ (unionized) | **Cannot be calculated from pH + temperature alone**. pH + temperature estimate the toxic fraction/risk; absolute NH₃ requires measured Total Ammonia Nitrogen (TAN) or a laboratory test. | Derived fraction only: Emerson et al. (1975), shown on the dashboard as % NH₃ of total ammonia |
 
 
 ## Deployment Corrections and Verification Gates
@@ -81,4 +78,5 @@ From **SEAFDEC/AQD (Philippines)** mud crab culture standards:
 2. **Aeration:** the MPQ-03's 68 L/min rating is open-flow, not guaranteed delivered flow. Measure each branch at operating depth with air stones installed; target approximately 4.8–6.4 L/min total for 320 L and regulate excess flow.
 3. **Salinity:** an open slotted cage is hydraulically connected to the estuary. Brine dosing is a controlled experiment only unless the cage is temporarily isolated or the test is closed-loop. Record tide, current, dose, and pre/post salinity at multiple points.
 4. **Electrical:** the 220 V AC drop is a licensed-electrician installation. Require shore-end 30 mA RCD protection, weatherproof connectors, drip loops, no submerged joints, conductor/fuse coordination, earthing verification, and a monthly RCD test.
-6. **Protocol:** use device ID, sequence number, CRC-8, expiry, ACK/NAK, a 60-second heartbeat, and immediate emergency uplinks for DO or other critical thresholds.
+6. **Protocol** *(rev. 2026-10)*: the float reports every 10 s over HTTPS with a per-device token; commands carry an id and a 90 s expiry and are acknowledged accepted/rejected; the DO emergency is handled locally in every mode. (The LoRa frame protocol with CRC-8 and ACK/NAK is deferred with LoRa; see [`FIRMWARE.md`](FIRMWARE.md).)
+7. **Wi-Fi coverage** *(rev. 2026-10)*: measure the house Wi-Fi signal at the float position; add an outdoor repeater/access point if needed.

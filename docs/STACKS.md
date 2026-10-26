@@ -2,86 +2,80 @@
 
 **Project:** Solar Automated LoRa-Integrated Mud Crab Aeration Network with Crab Grid Observation
 
-A layer-by-layer reference of every technology the system uses, from the pond hardware to the hosted dashboard. Selection rationale and validation notes live in [`Components.md`](Components.md); the architecture view is in [`SYSTEM-ARCHITECTURE.md`](SYSTEM-ARCHITECTURE.md).
+Layer-by-layer reference for the current phase. Architecture: [`SYSTEM-ARCHITECTURE.md`](SYSTEM-ARCHITECTURE.md).
 
-## 1. Stack at a Glance
+## 1. Stack at a glance
 
 ```mermaid
 flowchart TB
-    N1["Next.js dashboard on Vercel"] --> F1["Firebase Realtime Database + Auth"]
-    F1 --> B1["House bridge node, ESP32 + E22, WiFi"]
-    B1 -. "915 MHz LoRa point-to-point" .-> N2["Float node, ESP32 + E22"]
-    N2 --> H1["Sensors, relay module, air and bilge pumps on 12 V"]
+    N1["React + Vite + TypeScript dashboard on Vercel"] --> F1["Supabase: PostgreSQL, Realtime, anonymous Auth, RLS"]
+    F1 <--> N2["ESP32 float node, Arduino framework, Wi-Fi HTTPS"]
+    N2 --> H1["Sensors, relay module, air and bilge pumps"]
 ```
 
-**Figure 1.** Technology stack, from the hosted dashboard down to the pond hardware.
-
-## 2. Hardware Stack
+## 2. Hardware
 
 | Layer | Component | Qty | Role |
 |-------|-----------|-----|------|
-| Edge controller | ESP32 DevKit 38-pin (ESP32-WROOM-32) | 3 (float, bridge, spare/dev) | Runs control logic and the LoRa link |
-|| Radio | EBYTE E22-900T22D (SX1262, 915 MHz, 22 dBm) | 3 | Long-range point-to-point telemetry via UART |
-| Observation | ESP32-CAM-MB (OV2640) | 1 | Overhead visual monitoring over a WiFi AP |
-| Sensing | DFRobot EC K=10, pH E-201-C + PH-4502C, DS18B20 ×2, DO SEN0237-A | 1 ea (temp ×2) | Water-quality measurement |
-| Actuation | 8-channel relay, 2 × RESUN MPQ-03 air pumps, 2 × bilge pumps 1100 GPH | 1 set | Aeration and circulation |
-| Power | 220 V AC drop + 30 mA RCD, 12 V 30 A PSU, LM2596S 5 V module | 1 set | Household-solar-fed power chain |
-| Structure | 8 slotted fattening boxes, foam pontoons, PVC air/water grid, sensor hub | 1 set | Floating cage grid on the pond |
+| Controller | ESP32 DevKit 38-pin (ESP32-WROOM-32) on the perfboard | 1 (+ spare) | Sensing, control, Wi-Fi |
+| Sensing | DFRobot DFR0300 EC (K = 1), E-201-C + PH-4502C pH, DFRobot SEN0237-A DO, DS18B20 | 1 each | Water quality |
+| Actuation | 8-channel relay module (5 V, low-level trigger; K1/K5/K3/K4 used), 2 × RESUN MPQ-03 air pumps, 2 × 1100 GPH bilge pumps | 1 set | Aeration and salinity correction |
+| Local control | INScom LW28-20A M-O-A selector | 1 | Local authority over the mode |
+| Power | 220 V AC drop + 30 mA RCD, 12 V 30 A PSU, 12 V → 5 V buck | 1 set | Household-solar-fed power chain |
+| Reference instruments | Refractometer, DO9100 handheld DO meter, reference thermometer | 1 each | Cross-checks (not connected) |
 
-## 3. Firmware Stack
+## 3. Firmware
 
-| Technology | Used by | Purpose |
-|------------|---------|---------|
-| Arduino framework on ESP32 (Arduino IDE or PlatformIO) | all nodes | Build system and runtime |
-|| `EBYTE` | float, bridge | UART LoRa module control library |
-| `OneWire` + `DallasTemperature` | float | DS18B20 probes |
-| `DFRobot_EC` / `DFRobot_pH` | float | EC and pH conversion with calibration |
-| `Firebase Arduino Client Library` (Mobizt) | bridge | Realtime Database writes |
-| NVS/EEPROM storage | float | Calibration constants and config persistence |
+| Technology | Purpose |
+|------------|---------|
+| Arduino framework, esp32 core 3.3.12 (Arduino IDE 2 or `arduino-cli`) | Build and runtime |
+| FreeRTOS task (core 0) | Network I/O separate from the control loop |
+| `OneWire` + `DallasTemperature` | DS18B20 |
+| `ArduinoJson` 7 | Report and command JSON |
+| `WiFi`, `HTTPClient`, `NetworkClientSecure` (built-in CA bundle) | HTTPS to Supabase |
+| `Preferences` (NVS) | Calibration, settings |
+| Project code `sensor_math.*`, `control_logic.*` | Formulas and control rules (host-testable C++) |
 
-Protocol details (frames, CRC-8, ACK/NAK, heartbeat) are specified in [`FIRMWARE.md`](FIRMWARE.md) §5.
+The DFRobot `DFRobot_EC` / `DFRobot_pH` libraries are **not** used; their conversions are reproduced
+in `sensor_math.cpp` for the ESP32's ADC, as in the earlier bench sketches.
 
-## 4. Communication Stack
-
-| Link | Technology | Notes |
-|------|------------|-------|
-|| Pond ↔ house | LoRa point-to-point, 915 MHz (E22-900T22D), SF9, BW 125 kHz, CR 4-5, private sync word | Philippine NTC licence-free SRD band; confirm measured EIRP and type-approval |
-| House ↔ cloud | Home WiFi via the bridge node | The only internet-dependent hop |
-| Phone ↔ camera | WiFi AP (`crabcam-<id>`) | Pond-visit monitoring; video never traverses LoRa |
-| Packet integrity | Device ID, sequence, expiry, CRC-8, ACK/NAK, 60 s heartbeat | Defined in [`FIRMWARE.md`](FIRMWARE.md) §5 |
-
-## 5. Backend Stack
+## 4. Backend
 
 | Technology | Role |
 |------------|------|
-| Firebase Realtime Database | Live telemetry (`devices/<id>/state`), command queue, trimmed logs |
-| Firebase Auth (Email/Password) | Farmer and admin accounts; Auth-only database rules |
-| Service account (Vercel env vars) | Server-side database access; key never shipped to the client |
+| Supabase PostgreSQL | Tables, constraints, history |
+| PL/pgSQL `SECURITY DEFINER` functions | Device report, access claims, validated commands and settings |
+| Row-level security | Browsers see only devices they claimed with a sticker code |
+| Supabase Realtime | Live updates to the dashboard |
+| Supabase anonymous Auth | A session per browser without a login page |
+| `pgcrypto` / `sha256` | Hashing of access codes and device tokens |
 
-Schema: [`APP.md`](APP.md) §2.
-
-## 6. Frontend Stack
+## 5. Frontend
 
 | Technology | Role |
 |------------|------|
-| Next.js (React) | Dashboard UI: monitoring, control, parameters, alerts, history |
-| Vercel Hobby tier | Free hosting with the four Firebase env vars |
-| RTDB `onValue()` listeners | Live streaming state into the UI |
+| React 19 + TypeScript | UI |
+| Vite | Dev server and build |
+| `@supabase/supabase-js` | Queries, RPCs, Realtime |
+| Plain CSS, SVG charts | No UI or chart library |
+| Vercel | Hosting (`web/vercel.json`) |
 
-Feature specification and safety interlocks: [`APP.md`](APP.md) §1 and §5.
-
-## 7. Development and Documentation Tools
+## 6. Development and test tools
 
 | Tool | Use |
 |------|-----|
-| Arduino IDE / PlatformIO | Firmware builds and flashing |
-| Git + GitHub | Version control; tagged field deployments |
-| Node.js LTS | Dashboard development and build |
-| Mermaid | Thesis diagrams ([`FLOWCHART.md`](FLOWCHART.md), [`SYSTEM-ARCHITECTURE.md`](SYSTEM-ARCHITECTURE.md), [`BLOCK-DIAGRAM.md`](BLOCK-DIAGRAM.md), Figure 1 above) |
-| Markdown documentation set | Builder guides: [`SETUP.md`](SETUP.md), [`WIRING.md`](WIRING.md), [`TESTING.md`](TESTING.md), [`CALIBRATION.md`](CALIBRATION.md), [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) |
+| Vitest + Testing Library + jsdom | Dashboard tests |
+| PGlite (PostgreSQL 18 in WASM) | Migration and security tests without a server |
+| g++ (host) | Firmware math and control-logic tests |
+| ESLint, TypeScript | Lint and type check |
+| `npm run provision` / `npm run simulate` | Device provisioning, simulated device |
+| Mermaid | Diagrams in these docs |
 
-## 8. Explicit Non-Dependencies
+## 7. Explicit non-dependencies
 
-1. **No LoRaWAN server** (TTN/ChirpStack) — the link is plain point-to-point to the house bridge.
-2. **No on-site solar panels, MPPT, or battery** — power comes from the household's existing 24/7 solar-backed installation.
-3. **No paid hosting** — Firebase Spark and Vercel Hobby free tiers cover the project scale.
+1. **No Firebase** (replaced by Supabase).
+2. **No camera** stack (removed).
+3. **No LoRa** library or house bridge in this phase (deferred).
+4. **No service-role key** in the browser, Vercel or the ESP32.
+5. **No on-site solar panels, MPPT or battery**: power comes from the household's 24/7 solar-backed
+   supply.

@@ -2,96 +2,100 @@
 
 **Project:** Solar Automated LoRa-Integrated Mud Crab Aeration Network with Crab Grid Observation
 
-This document presents the hardware block diagram in the format required . It shows the float node's power chain, controller, sensor cluster, LoRa radio, relay-driven actuators, and local interface, plus the radio link to the house bridge. Pin numbers follow the verified map in [`WIRING.md`](WIRING.md) §3.
+Float-node hardware for the current phase. Pins follow
+[`perfboard_build_guide.pdf`](../perfboard_build_guide.pdf) as listed in [`WIRING.md`](WIRING.md) §3.
 
-## 1. Block Diagram
+## 1. Block diagram
 
 ```mermaid
 flowchart LR
-    subgraph PWR["Power System"]
+    subgraph PWR["Power"]
         AC["220 V AC from household solar, 24/7"] --> RCD["30 mA RCD + 2-pole breaker, shore end"]
-        RCD --> PSU["12 V 30 A switching PSU, 360 W"]
-        PSU --> BUCK["LM2596S 24 V/12 V to 5 V USB step-down"]
+        RCD --> PSU["12 V 30 A switching PSU"]
+        PSU --> BUCK["Buck 12 V to 5 V"]
     end
 
-    subgraph CTRL["Main Controller"]
+    subgraph CTRL["Controller (perfboard)"]
         CORE["ESP32 DevKit 38-pin, ESP32-WROOM-32"]
     end
 
-    subgraph SEN["Sensor Cluster"]
-        S1["pH analog output to GPIO 34, ADC1"]
-        S2["EC/salinity analog output to GPIO 35, ADC1"]
-        S3["DO analog output to GPIO 36, ADC1"]
-        S4["2x DS18B20 shared 1-Wire bus on GPIO 19"]
+    subgraph SEN["Sensors"]
+        S1["pH board, Po -> 10k/20k divider -> GPIO34 (ADC1)"]
+        S2["EC board DFR0300 K = 1 -> GPIO35 (ADC1)"]
+        S3["DO board SEN0237-A -> GPIO36/VP (ADC1)"]
+        S4["DS18B20 1-Wire -> GPIO19, 4.7k pull-up"]
     end
 
-    subgraph RAD["LoRa Radio"]
-        R1["EBYTE E22-900T22D, SX1262: UART Serial2 TX 16/RX 17, built-in SMA antenna"]
-    end
-
-    subgraph RLY["Relay Module, 8-channel, GPIO 25 / 27 / 33 / 13"]
-        K1["Channel 1"]
-        K2["Channel 2"]
-        K3["Channel 3"]
-        K4["Channel 4"]
+    subgraph RLY["Relay module, low-level trigger, 10k pull-ups"]
+        K1["K1 <- GPIO25"]
+        K5["K5 <- GPIO27 (lead moved from IN2)"]
+        K3["K3 <- GPIO33"]
+        K4["K4 <- GPIO13"]
     end
 
     subgraph ACT["Actuators"]
-        P1["RESUN MPQ-03 air pump 1, 35 W"]
-        P2["RESUN MPQ-03 air pump 2, 35 W"]
-        P3["12 V bilge pump 1, 1100 GPH"]
-        P4["12 V bilge pump 2, 1100 GPH"]
+        P1["Air pump 1, RESUN MPQ-03"]
+        P2["Air pump 2, RESUN MPQ-03"]
+        P3["Bilge pump 1, 1100 GPH"]
+        P4["Bilge pump 2, 1100 GPH"]
     end
 
-    subgraph LOC["Local Interface"]
-        H1["3-position rotary selector on GPIO 4 and 21"]
-        H2["Mode and status LEDs on GPIO 22 and 2"]
+    subgraph LOC["Local interface"]
+        H1["M-O-A selector, GPIO4 (M) and GPIO21 (A)"]
+        H2["Onboard LED GPIO2: link status"]
     end
 
-    BR["House bridge node, ESP32 + E22-900T22D"]
-    V1["ESP32-CAM-MB OV2640, 5 V from LM2596S module, WiFi AP only"]
+    WIFI["House Wi-Fi router, 2.4 GHz"]
+    E22["E22 socket GPIO16/17: not fitted (LoRa deferred)"]
 
-    PSU --> CORE
-    PSU --> K1
-    BUCK --> V1
+    PSU --> P1
+    PSU --> P2
+    PSU --> P3
+    PSU --> P4
+    BUCK --> CORE
+    BUCK --> RLY
     S1 --> CORE
     S2 --> CORE
     S3 --> CORE
     S4 --> CORE
-    CORE --> R1
-    R1 --> CORE
-    R1 -. 915 MHz LoRa point-to-point, uplink and downlink .-> BR
+    H1 --> CORE
+    CORE --> H2
     CORE --> K1
-    CORE --> K2
+    CORE --> K5
     CORE --> K3
     CORE --> K4
     K1 --> P1
-    K2 --> P2
+    K5 --> P2
     K3 --> P3
     K4 --> P4
-    H1 --> CORE
-    CORE --> H2
+    CORE <-. "Wi-Fi, HTTPS to Supabase" .-> WIFI
+    CORE -.- E22
 ```
 
-**Figure 1.** Hardware block diagram of the float node and its link to the house bridge.
+**Figure 1.** Float-node hardware block diagram (current phase).
 
-## 2. Block Descriptions
+## 2. Block descriptions
 
 | Block | Function | Key interfaces |
 |-------|----------|----------------|
-| Power system | 220 V AC from the household solar installation, protected by a shore-end 30 mA RCD, converted to 12 V DC and 5 V DC | Licensed-electrician AC side; 12 V feeds pumps, relays and controller; 5 V feeds the camera |
-| Main controller | ESP32-WROOM-32 runs the automation logic, LoRa protocol, and fail-safe rules | Three ADC1 analog inputs, 1-Wire, VSPI to the radio, four relay outputs |
-| Sensor cluster | DO, pH, EC/salinity, and two temperature probes | Analog on GPIO 34/35/36 (ADC1); DS18B20 pair on GPIO 19 with a 4.7 kΩ pull-up |
-| LoRa radio | EBYTE E22-900T22D (SX1262) at 915 MHz | UART Serial2: TX 16, RX 17; built-in SMA antenna; 22 dBm output; 5 km range; TTL 3.3V–5V compatible |
-| Relay module | 8-channel, 12 V coil, optocoupler, low-level trigger; four channels used, four spare | External 10 kΩ pull-ups hold relays OFF through boot and reset |
-| Actuators | Two RESUN MPQ-03 air pumps (N+1 alternating duty) and two bilge pumps | Branch-fused 12 V feeds; per-cage valves on the water header |
-| Local interface | 3-position AUTO/OFF/MANUAL selector and status LEDs | Active-LOW decode on GPIO 4/21; LEDs on GPIO 22/2 |
-| Camera node | ESP32-CAM-MB OV2640 for overhead visual monitoring | WiFi AP during pond visits; never streams over LoRa |
-| House bridge | Second ESP32 + E22 at the house | Relays LoRa ↔ Firebase in both directions |
+| Power | 220 V AC from the household solar system, shore-end RCD, 12 V PSU, 5 V buck | Electrician-installed AC; 12 V to the pumps through relays and fuses; 5 V to the ESP32 and relay module VCC |
+| Controller | ESP32-WROOM-32 on the perfboard: sensing, calibration, control, Wi-Fi | Three ADC1 inputs, 1-Wire, four relay outputs, two selector inputs |
+| Sensors | pH, EC (K = 1), DO, temperature | Analog on GPIO34/35/36 (ADC1, Wi-Fi-safe); DS18B20 on GPIO19 |
+| Relay module | Low-level trigger; K1, K5, K3, K4 used (K2 defective) | 10 kΩ pull-ups keep relays off through reset |
+| Actuators | Two RESUN MPQ-03 air pumps (switched together, 5 s apart), two 1100 GPH bilge pumps (2 s apart) | Branch-fused 12 V |
+| Local interface | M-O-A selector (local authority), onboard LED | Active-LOW inputs on GPIO4/21 |
+| Wi-Fi | House router | Must reach the float; 2.4 GHz |
 
-## 3. Design Notes
+## 3. Design notes
 
-1. All analog sensors sit on **ADC1** so the pin map stays valid even if WiFi is later enabled on a node ([`WIRING.md`](WIRING.md) §4).
-2. No actuator is connected to a boot-strapping pin; GPIO 0, 12, 15 and UART0 pins 1/3 remain unconnected.
-3. The relay module's low-level trigger is boot-safe: firmware drives the GPIOs HIGH before initialization and external pull-ups keep the inputs released during reset.
-4. The pipe grid carries the air and water headers as separate circuits; it is conduit, never flotation ([`Components.md`](Components.md) — Floaters).
+1. All analog inputs are on **ADC1**, which keeps working while Wi-Fi is on.
+2. No load on a boot-strapping pin; GPIO0, 5, 12, 15 and UART0 (1/3) are unused.
+3. Relay outputs are driven HIGH before initialisation and held off by pull-ups through reset; the
+   firmware then turns the air pumps on (fail-safe aeration at boot).
+4. The relay module is 5 V with 3.3 V logic inputs; confirm each relay is fully off with the input at
+   3.3 V ([`WIRING.md`](WIRING.md) §6).
+
+## Removed and deferred blocks
+
+- **Camera node (ESP32-CAM-MB, OV2640)** and its 5 V USB module: removed in this phase.
+- **LoRa radio (E22-900T22D) and house bridge node:** deferred; the perfboard's E22 socket stays empty.

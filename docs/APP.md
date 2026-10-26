@@ -2,117 +2,177 @@
 
 **Project:** Solar Automated LoRa-Integrated Mud Crab Aeration Network with Crab Grid Observation
 
-The webapp is a **Next.js + Firebase Realtime Database + Auth** application on Vercel's free tier. It gives the farmer live monitoring, safe remote control (AUTO/MANUAL/OFF and per-pump overrides), and remote parameter editing — while the local selector remains the fail-safe ([`Components.md`](Components.md) — Control Interface).
+The dashboard is a **React (Vite + TypeScript)** single-page app in [`web/`](../web/), hosted on
+**Vercel**, with **Supabase** (PostgreSQL, Realtime, anonymous Auth) as the backend. It replaces the
+earlier Next.js + Firebase design. The local selector on the box remains the fail-safe.
 
-## 1. Feature Set
+## 1. Access: QR code or typed code, no login page
 
-| Area | Features |
-|------|----------|
-| Monitoring | Live DO, pH, salinity/EC, temperature ×2, mode, pump states, link quality (RSSI/SNR), last-seen time, stale-data banner |
-| Control | AUTO / MANUAL / OFF mode selector, per-pump overrides in MANUAL, ACK/NAK feedback, MANUAL revert countdown |
-| Parameters | Threshold editor with range validation, written to the device config and relayed to the float on the next downlink |
-| Alerts | DO emergency, threshold breach, heartbeat loss, sensor fault, command NAK/expired |
-| History | Trimmed log in RTDB, 24 h / 7 d charts, CSV export for data |
-| Admin | Device registry, farmer/admin roles via Firebase Auth, calibration due-date reminders |
+1. Each float node has a sticker with a **QR code** and an **access code** (8 characters, e.g.
+   `K7QM-3XRP`), made by `npm run provision` ([`SETUP.md`](SETUP.md)).
+2. The QR opens `https://<site>/?code=K7QM-3XRP`; typing the code on the start page does the same.
+   Case, spaces, dashes and O/I typed for 0/1 are tolerated.
+3. The browser gets an **anonymous Supabase session** (no username or password), and
+   `claim_device_access(code)` grants that session access to the device. The code is then removed from
+   the address bar; the phone remembers the pond.
+4. **The code opens the whole site, including control** (project decision: farmers should not have to
+   remember credentials).
 
-## 2. Realtime Database Schema
+Security model and limitations:
 
-```
-devices/
-  <deviceId>/
-    state/            # written by the house bridge from each uplink
-      mode: "AUTO" | "MANUAL" | "OFF"
-      pumps: { air1, air2, bilge1, bilge2 }
-      do, ph, ec, temp1, temp2        # scaled values
-      rssi, snr, seq, emergency, sensorFault
-      lastSeen: <serverTimestamp>
-    config/
-      device/    { name, location, radio: { freq, sf, bw, cr } }
-      thresholds/ { doEmergency, doTarget, salMin, salMax, phMin, phMax,
-                    tempMin, tempMax, manualRevertMin, aerationOn, aerationOff }
-      calibration/ { phDue, ecDue, doDue }     # ISO dates, drives reminders
-commands/
-  <deviceId>/
-    queue/<pushKey>/
-      cmdId, mode, pumpBitmap, expiryMs, issuedBy, issuedAt
-      status: "pending" | "sent" | "acked" | "naked" | "expired"
-logs/
-  <deviceId>/<timestamp>/   # trimmed history; the UI offers CSV export
-users/
-  <uid>/ { name, role: "farmer" | "admin" }
-```
+| Point | Behaviour |
+|-------|-----------|
+| What the code is | A shared credential printed on the box. Anyone who can read or photograph the sticker can view **and control** the pond until the code is replaced |
+| Guessing | 8 Crockford base-32 characters ≈ 1.1 × 10¹² codes; only the SHA-256 hash is stored |
+| Revocation | `admin_rotate_access_code(device, new_code)` replaces the code and signs out every phone that used the old one; print a new sticker |
+| What browsers can do | Read the claimed device's rows (RLS) and call `request_command` / `update_device_settings`, which validate everything. No table is directly writable |
+| Device credential | Per-device token (hash stored), used only by the ESP32 with the public anon key; revoke with `admin_rotate_device_token` |
+| Service-role key | Only on an admin computer for provisioning; never in the browser, Vercel or the ESP32 |
+| Audit | Every command records the anonymous session id (`requested_by`) and times; settings record `updated_by` |
+| Anonymous sign-ins | Must be enabled in Supabase Auth; consider enabling CAPTCHA protection there to limit automated sign-ups |
 
-## 3. Pages
+## 2. Pages
 
-1. **Dashboard** — live cards for every value in `state/`; a STALE banner when `lastSeen` is older than 90 s (heartbeat-loss rule, [`FIRMWARE.md`](FIRMWARE.md) §6).
-2. **Control** — mode selector with confirmations; per-pump switches enabled only in MANUAL; each command shows its ACK/NAK result and expiry; MANUAL shows a live revert countdown.
-3. **Parameters** — threshold editor (§6 validation table); writes land in `config/thresholds` with `issuedBy` + timestamp, and the bridge relays them as a config downlink; firmware clamps values again (defense in depth).
-4. **Alerts** — alert list and history; in-app banners now, email/SMS hooks later.
-5. **History** — charts (24 h / 7 d) from `logs/`, CSV export for data charts.
-6. **Devices** — registry and roles; admins manage devices and users.
-7. **Camera** — instructions to join the camera's WiFi AP (`crabcam-<id>`) during pond visits; the camera is WiFi-only by design and never streams over LoRa.
+### Start page
+Access-code entry (no password field), list of ponds saved on this phone, language switch.
 
-## 4. Command Flow
+### Water Quality Sensing (main tab)
+
+| Card | Shows |
+|------|-------|
+| pH | Calibrated pH (2 dp), status, target 7.5–8.5, calibration badge, "approximate" note when temperature is faulted |
+| Salinity | PSS-78 salinity (ppt, 1 dp), conductivity at temperature and EC25 (mS/cm), target salMin–salMax, EC calibration badge; explains *over range* (above the K = 1 probe's ≈ 11 ppt), *below range* (< 2 ppt) and *not available* |
+| Water temperature | °C (1 dp), target 27–30 °C, second probe if present, "used to compensate pH, EC/salinity and DO". No calibration |
+| Dissolved oxygen | mg/L (2 dp), ≥ 5 good / 3–5 warning / < 3 critical, DO calibration badge, DO-emergency notice |
+| Ammonia toxicity | Emerson (1975) unionized NH₃ fraction (%), labelled as an estimated fraction, not a concentration; *not available* when pH or temperature is invalid |
+
+Below the cards: operating mode, pumps and salinity correction, history charts (24 h / 7 d for all
+five indicators with target bands; gaps where there was no valid reading), and recent events.
+
+### Calibration
+pH, salinity/EC (shows **K = 1**, standards, correction factors), dissolved oxygen (SEN0237-A; explains
+that the DO9100 is a separate cross-check instrument), and ammonia-toxicity calculation information
+(formula, source, assumptions — nothing to calibrate). Each calibratable section shows status,
+version, when it was recorded, active values, the live session (stable/settling, captured points),
+Start/Capture/Save/Cancel and the device's answer, and previous calibrations. Temperature has no
+calibration section.
+
+### Settings & Data
+Salinity-correction settings (§6), history retention (keep everything, or delete after N days),
+**Download all readings (CSV)** and **Download all events (CSV)**, device information.
+
+## 3. Behaviour rules
+
+- **Live / stale:** the device reports every 10 s. A report older than 45 s (by the server's clock)
+  marks the whole page stale: last-known values stay visible, greyed and labelled, with a banner. The
+  mode is shown as "last known", never as confirmed.
+- **No false zeros:** a value is shown only for status `ok` or `degraded`; otherwise the card shows
+  *Sensor fault*, *Over range*, *Not detected* or *Not available*. A real 0 is shown as 0.
+- **Simulated data:** reports flagged `simulated` (from `npm run simulate`) show a red
+  "SIMULATED DATA" banner, and CSV rows carry `simulated = true`.
+- **Requested vs confirmed:** the mode panel shows the device's mode and, separately, the requested
+  mode while a request is waiting. Every request shows *Sending… / Waiting for the device… / Done /
+  Refused by the device: reason / Not delivered / No answer from the device*.
+- **Realtime:** Supabase Realtime updates state, commands, events, settings and calibration records;
+  if the subscription drops, the page refreshes every 30 s and says so.
+- **Language:** English or Filipino, remembered per phone.
+
+## 4. Data model (Supabase)
+
+Migration: [`supabase/migrations/20261026000000_salimango_initial.sql`](../supabase/migrations/20261026000000_salimango_initial.sql).
+
+| Table | Content | Written by |
+|-------|---------|------------|
+| `devices` | Name, active flag, hashes of access code and device token, access epoch | Admin functions |
+| `device_access_grants` | Browser session ↔ device, with the access epoch | `claim_device_access` |
+| `device_settings` | salMin/salMax/salHyst, bilge times and tries, retention, version | `update_device_settings` |
+| `device_state` | Latest report: measurements (numeric, units in column names), statuses, mode, selector, relays K1/K5/K3/K4, bilge state, calibration (JSON), applied settings version | `device_report` |
+| `readings` | History, at most one row per minute, with the calibration ids in force | `device_report` |
+| `calibration_records` | One row per saved calibration (sensor, version, id, parameters) | `device_report` |
+| `commands` | Requests with status pending → delivered → accepted/rejected, or expired/superseded | `request_command`, `device_report` |
+| `events` | Device events (severity, kind, message) | `device_report` |
+
+RPCs: browser — `claim_device_access`, `request_command`, `update_device_settings`, `server_time`;
+device — `device_report`; admin (service role only) — `admin_register_device`,
+`admin_rotate_access_code`, `admin_rotate_device_token`, `admin_set_device_active`.
+
+Retention: `readings` rows older than `retention_days` are deleted during device reports when a window
+is set; `NULL` (the default) keeps everything. Calibration records, events and commands are kept.
+
+## 5. Command flow
 
 ```mermaid
 sequenceDiagram
-    participant U as Operator (webapp)
-    participant RT as Firebase Realtime Database
-    participant B as House bridge node
-    participant F as Float node
+    participant U as Farmer (browser)
+    participant DB as Supabase (PostgreSQL)
+    participant F as ESP32 float node
 
-    U->>RT: Write command (mode or pump override)
-    B->>RT: Poll command queue on each uplink cycle
-    RT-->>B: Pending command
-    B->>F: LoRa downlink: ID, seq, mode, pumps, expiry, CRC-8
-    F-->>B: ACK (applied) or NAK (rejected)
-    B->>RT: Mark command acked or nacked
-    F->>B: Next uplink echoes mode and pump state
-    B->>RT: Update devices/id/state
-    RT-->>U: Live UI update via onValue()
+    U->>DB: request_command(device, kind, payload) — validated, expires in 90 s
+    F->>DB: device_report(token, state + acks + events) every 10 s (2 s when busy)
+    DB-->>F: pending commands + current settings
+    F->>F: validate again (selector, mode, DO interlock), act
+    F->>DB: next report: ack accepted/rejected + message, new state
+    DB-->>U: Realtime: command status and device state
 ```
 
-Command latency is one uplink cycle (≤ 60 s); DO emergencies bypass the schedule entirely ([`FIRMWARE.md`](FIRMWARE.md) §5–6).
+A request the device never collects becomes *expired*; one it collected but did not answer is shown as
+*No answer from the device* after its expiry.
 
-## 5. Safety Interlocks
+## 6. Settings and validation
 
-| Interlock | Behavior |
-|-----------|----------|
-| Aeration lock | Aeration cannot be fully disabled while DO is below `doEmergency` — rejected in the UI, re-checked in firmware |
-| OFF confirmation | OFF requires a typed confirmation warning that crabs must not be stocked |
-| MANUAL revert | MANUAL auto-reverts to AUTO after `manualRevertMin` without a fresh command (default 5 min); the UI shows the countdown |
-| Command expiry | Every command carries an expiry; stale commands are NAKed |
-| Fail-safe default | Boot, reset, or link loss → AUTO with aeration ON |
-| Local authority | The physical selector overrides the dashboard at the device |
+| Parameter | Default | Allowed | Unit | Used for |
+|-----------|---------|---------|------|----------|
+| `salMin` | 28 | 10–34 | ppt | AUTO bilge turns on below it (3 readings) |
+| `salMax` | 32 | 10–34, > salMin | ppt | High-salinity warning on the dashboard |
+| `salHyst` | 2.0 | 1.0–5.0 | ppt | Bilge stops at salMin + salHyst |
+| `bilgeMaxRunMin` | 15 | 5–60 | min | Maximum run before a timeout |
+| `bilgeMinOffMin` | 30 | 10–120 | min | Rest after a run |
+| `bilgeMaxFails` | 3 | 1–10 | count | Timeouts in a row before lockout |
+| `retention_days` | empty (keep all) | 7–3650 | days | History deletion |
 
-## 6. Threshold Validation Ranges
+The bilge values come from [`salinity_rev.md`](../salinity_rev.md) and are engineering starting values
+to be tuned in bench tests. The same limits are enforced by the form, the database and the firmware.
+With the K = 1 probe, salinity above ≈ 11 ppt is over range and counts as "not low".
 
-| Parameter | Default | Allowed range | Unit |
-|-----------|---------|---------------|------|
-| `doEmergency` | 3.0 | 2.0–4.0 | ppm |
-| `doTarget` | 5.0 | 4.0–7.0 | ppm |
-| `salMin` | 28 | 10–34 | ppt |
-| `salMax` | 32 | 10–34 (must exceed `salMin`) | ppt |
-| `phMin` | 7.5 | 6.5–8.5 | pH |
-| `phMax` | 8.5 | 7.0–9.0 (must exceed `phMin`) | pH |
-| `tempMin` | 27 | 20–33 | °C |
-| `tempMax` | 30 | 22–35 (must exceed `tempMin`) | °C |
-| `manualRevertMin` | 5 | 1–30 | min |
-| `aerationOn` / `aerationOff` | 18:00 / 06:00 | HH:MM | optional night schedule |
+Display targets (colours only; control is in the firmware): pH 7.5–8.5, temperature 27–30 °C, DO ≥ 5
+mg/L (critical < 3) — SEAFDEC/AQD values in [`Components.md`](Components.md).
 
-## 7. Alerts
+## 7. Safety interlocks
 
-| Alert | Trigger | Path |
-|-------|---------|------|
-| DO emergency | `state.do < doEmergency` | Immediate emergency uplink flag; red banner; logged |
-| Threshold breach | Any value outside its band for two consecutive uplinks | Banner + alert history |
-| Heartbeat loss | No uplink for 90 s | Bridge local alarm **and** dashboard banner — the bridge alarms even when the internet is down |
-| Sensor fault | `state.sensorFault` bit or impossible values | Banner + history |
-| Command NAK/expired | `commands/.../status` | Shown next to the command |
+| Interlock | Where |
+|-----------|-------|
+| OFF needs a confirmation dialog, and `confirm: true` in the request | Dashboard + database + firmware |
+| Selector at M or O overrides the dashboard; mode buttons are disabled with an explanation | Firmware + dashboard |
+| Pumps switch only in MANUAL; buttons disabled otherwise and while data is stale | Firmware + dashboard |
+| Air pumps cannot be switched off during a DO emergency | Firmware + dashboard |
+| MANUAL returns to AUTO after 5 min without a command (countdown shown) | Firmware |
+| Requests expire after 90 s | Database + firmware |
+| Boot, reset or Wi-Fi loss never switch aeration off | Firmware |
 
-## 8. Non-Functional Requirements
+## 8. CSV export
 
-1. **Free tier budget:** keep live state in one node, trim `logs/<id>` (e.g., last 7 days) so RTDB stays inside the Spark plan.
-2. **Security:** Auth-only database rules ([`SETUP.md`](SETUP.md) §5); the service-account key exists only server-side as Vercel env vars — never in client code.
-3. **Offline behavior:** if the house internet drops, the dashboard goes stale but the bridge keeps alarming locally and the float keeps running AUTO.
-4. **Auditability:** every command and threshold edit records `issuedBy` and a timestamp for the audit log.
+"Download all readings" exports every stored history row for the device (paged 1000 at a time), oldest
+first: time (UTC, ISO 8601), sequence, simulated flag, mode, pH, EC, EC25, salinity, temperature, DO,
+NH₃ fraction, each with its status, DO emergency, relays K1/K5/K3/K4, bilge state and calibration ids.
+Empty cells mean "no value" (never zero). UTF-8 with BOM so Excel shows °C correctly.
+"Download all events" exports time, severity, kind and message.
+
+## 9. Code
+
+| Path | Contents |
+|------|----------|
+| `web/src/App.tsx` | Session start, QR/typed-code access, saved ponds |
+| `web/src/hooks/useDevice.ts` | Loading, Realtime, polling fallback, server clock, commands, settings |
+| `web/src/components/` | Tabs, cards, mode/pump panels, charts, calibration, settings, export |
+| `web/src/lib/` | Types, status rules, CSV/history, translations, Supabase client |
+| `web/scripts/provision-device.mjs` | Device registration, sticker QR |
+| `web/scripts/simulate-device.mjs` | Simulated device for development |
+| `web/tests/` | Database (PGlite), library and UI tests |
+
+## Deferred / removed from the previous design
+
+- **Firebase** (Realtime Database, Auth, service-account env vars): replaced by Supabase.
+- **Camera page** (ESP32-CAM-MB access point): removed with the camera.
+- **LoRa**: in the previous design the house bridge polled the command queue and relayed commands over
+  LoRa, with a heartbeat-loss alarm at the house after 90 s. Deferred; the commands, acks and state in
+  §4–5 are transport-independent so a bridge can be added later.
