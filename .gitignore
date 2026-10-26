@@ -11,3 +11,14 @@ Thumbs.db
 Desktop.ini
 
 
+
+# Dashboard (web/)
+web/node_modules/
+web/dist/
+web/.env
+web/.env.local
+# Provisioning output contains device secrets
+web/provisioning/
+
+# Firmware secrets (Wi-Fi password, device token)
+firmware/**/secrets.h
