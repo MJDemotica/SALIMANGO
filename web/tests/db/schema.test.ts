@@ -20,7 +20,8 @@ function report(overrides: Record<string, unknown> = {}) {
     selector: 'AUTO',
     manual_expires_in_s: null,
     do_emergency: false,
-    relays: { k1: true, k2: true, k3: false, k4: false },
+    relays: { k1: true, k3: false, k4: false, k5: true },
+    bilge: { state: 'IDLE', fail_count: 0 },
     ph: { value: 7.9, status: 'ok', mv: 1580 },
     ec: { ec_ms_cm: 12.1, ec25_ms_cm: 11.2, status: 'ok', mv: 1980 },
     salinity: { value: 6.9, status: 'ok' },
@@ -39,9 +40,24 @@ function report(overrides: Record<string, unknown> = {}) {
   };
 }
 
-type ReportResponse = {
-  commands: Array<{ id: string; kind: string; payload: unknown }>;
-  settings: { version: number; sal_min_ppt: number; sal_max_ppt: number };
+type Settings = {
+  version: number;
+  sal_min_ppt: number;
+  sal_max_ppt: number;
+  sal_hyst_ppt: number;
+  bilge_max_run_min: number;
+  bilge_min_off_min: number;
+  bilge_max_fails: number;
+};
+type ReportResponse = { commands: Array<{ id: string; kind: string; payload: unknown }>; settings: Settings };
+
+const DEFAULT_SETTINGS = {
+  sal_min_ppt: 28,
+  sal_max_ppt: 32,
+  sal_hyst_ppt: 2,
+  bilge_max_run_min: 15,
+  bilge_min_off_min: 30,
+  bilge_max_fails: 3,
 };
 
 async function deviceReport(db: Db, body: unknown, token = TOKEN): Promise<ReportResponse> {
@@ -125,7 +141,7 @@ describe('Supabase schema (PGlite)', () => {
   it('accepts a valid report, returns settings, and stores one history row per minute', async () => {
     const res = await deviceReport(db, report());
     expect(res.commands).toEqual([]);
-    expect(res.settings).toEqual({ version: 1, sal_min_ppt: 28, sal_max_ppt: 32 });
+    expect(res.settings).toEqual({ version: 1, ...DEFAULT_SETTINGS });
     await deviceReport(db, report({ seq: 2 }));
     const readings = await db.query<{ salinity_ppt: number; nh3_fraction: number }>(
       'select salinity_ppt, nh3_fraction from public.readings',
@@ -182,7 +198,8 @@ describe('Supabase schema (PGlite)', () => {
   it('validates command payloads and requires confirmation for OFF', async () => {
     await expect(command(USER_A, 'set_mode', { mode: 'OFF' })).rejects.toThrow(/explicitly confirmed/);
     await expect(command(USER_A, 'set_mode', { mode: 'TURBO' })).rejects.toThrow(/set_mode requires/);
-    await expect(command(USER_A, 'set_relays', { k5: true })).rejects.toThrow(/only k1..k4/);
+    await expect(command(USER_A, 'set_relays', { k2: true })).rejects.toThrow(/only k1, k3, k4 and k5/);
+    await expect(command(USER_A, 'clear_bilge_lockout', { force: true })).rejects.toThrow(/no parameters/);
     await expect(command(USER_A, 'set_relays', { k1: 'on' })).rejects.toThrow(/true or false/);
     await expect(command(USER_A, 'calibration', { sensor: 'temp', action: 'enter' })).rejects.toThrow(
       /calibration requires/,
@@ -223,23 +240,38 @@ describe('Supabase schema (PGlite)', () => {
     expect(r.rows[0].status).toBe('expired');
   });
 
-  it('validates salinity thresholds and hands the new version to the device', async () => {
-    const update = (min: number, max: number) =>
-      as(db, 'authenticated', USER_A, () =>
-        db.query<{ v: number }>('select public.update_device_settings($1, $2, $3) as v', [deviceId, min, max]),
+  it('validates settings and hands the new version to the device', async () => {
+    type Args = [number, number, number, number, number, number, number | null];
+    const base: Args = [28, 32, 2, 15, 30, 3, null];
+    const update = (args: Args, uid = USER_A) =>
+      as(db, 'authenticated', uid, () =>
+        db.query<{ v: number }>('select public.update_device_settings($1, $2, $3, $4, $5, $6, $7, $8) as v', [
+          deviceId,
+          ...args,
+        ]),
       );
-    await expect(update(9, 32)).rejects.toThrow(/between 10 and 34/);
-    await expect(update(28, 35)).rejects.toThrow(/between 10 and 34/);
-    await expect(update(30, 30)).rejects.toThrow(/higher than salMin/);
-    await expect(
-      as(db, 'authenticated', USER_B, () =>
-        db.query('select public.update_device_settings($1, 20, 30)', [deviceId]),
-      ),
-    ).rejects.toThrow(/No access/);
-    const v = await update(20.04, 30);
+    const withArg = (i: number, v: number | null): Args => base.map((x, j) => (j === i ? v : x)) as Args;
+    await expect(update(withArg(0, 9))).rejects.toThrow(/between 10 and 34/);
+    await expect(update(withArg(1, 35))).rejects.toThrow(/between 10 and 34/);
+    await expect(update(withArg(1, 28))).rejects.toThrow(/higher than salMin/);
+    await expect(update(withArg(2, 0.5))).rejects.toThrow(/salHyst/);
+    await expect(update(withArg(3, 61))).rejects.toThrow(/maximum run time/);
+    await expect(update(withArg(4, 5))).rejects.toThrow(/minimum off time/);
+    await expect(update(withArg(5, 0))).rejects.toThrow(/maximum failures/);
+    await expect(update(withArg(6, 3))).rejects.toThrow(/Retention/);
+    await expect(update(base, USER_B)).rejects.toThrow(/No access/);
+    const v = await update([20.04, 30, 2.5, 20, 45, 4, 30]);
     expect(v.rows[0].v).toBe(2);
     const res = await deviceReport(db, report({ seq: 8 }));
-    expect(res.settings).toEqual({ version: 2, sal_min_ppt: 20, sal_max_ppt: 30 });
+    expect(res.settings).toEqual({
+      version: 2,
+      sal_min_ppt: 20,
+      sal_max_ppt: 30,
+      sal_hyst_ppt: 2.5,
+      bilge_max_run_min: 20,
+      bilge_min_off_min: 45,
+      bilge_max_fails: 4,
+    });
   });
 
   it('records device events', async () => {
@@ -270,12 +302,22 @@ describe('Supabase schema (PGlite)', () => {
     await command(USER_A, 'set_mode', { mode: 'AUTO' });
   });
 
-  it('prunes old history rows only', async () => {
-    await db.query(`update public.readings set recorded_at = now() - interval '100 days'`);
-    const r = await as(db, 'service_role', null, () =>
-      db.query<{ n: string }>('select public.prune_old_readings() as n'),
-    );
-    expect(Number(r.rows[0].n)).toBeGreaterThan(0);
+  it('keeps history forever by default and prunes only when a retention window is set', async () => {
+    const count = async () => Number((await db.query<{ n: string }>('select count(*) as n from public.readings')).rows[0].n);
+    // force the next report to write history, and age every existing row
+    const age = async () => {
+      await db.query(`update public.readings set recorded_at = now() - interval '100 days'`);
+      await db.query(`update public.device_state set last_history_at = now() - interval '2 minutes'`);
+    };
+    await db.query(`update public.device_settings set retention_days = null`);
+    await age();
+    const before = await count();
+    await deviceReport(db, report({ seq: 20 }));
+    expect(await count()).toBe(before + 1);
+    await db.query(`update public.device_settings set retention_days = 90`);
+    await age();
+    await deviceReport(db, report({ seq: 21 }));
+    expect(await count()).toBe(1);
     const cal = await db.query('select * from public.calibration_records');
     expect(cal.rows).toHaveLength(1);
   });

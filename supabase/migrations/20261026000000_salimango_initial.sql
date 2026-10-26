@@ -68,16 +68,24 @@ create table public.device_access_grants (
 -- ---------------------------------------------------------------------------
 -- Adjustable device settings (requested here; the device reports the version
 -- it has applied in device_state.settings_version).
--- Defaults and ranges: salMin 28 ppt, salMax 32 ppt, both 10–34 ppt,
--- salMax > salMin (docs/APP.md threshold table).
+-- Salinity thresholds: docs/APP.md threshold table. Bilge-pump tuning values
+-- (salHyst, max run, min off, max failures) come from salinity_rev.md and are
+-- engineering starting values to be tuned during bench testing.
+-- retention_days: NULL keeps history forever; otherwise readings older than
+-- this many days are deleted (export CSV first).
 -- ---------------------------------------------------------------------------
 create table public.device_settings (
-  device_id   uuid primary key references public.devices (id) on delete cascade,
-  version     integer not null default 1,
-  sal_min_ppt numeric(4, 1) not null default 28 check (sal_min_ppt between 10 and 34),
-  sal_max_ppt numeric(4, 1) not null default 32 check (sal_max_ppt between 10 and 34),
-  updated_at  timestamptz not null default now(),
-  updated_by  uuid,
+  device_id           uuid primary key references public.devices (id) on delete cascade,
+  version             integer not null default 1,
+  sal_min_ppt         numeric(4, 1) not null default 28 check (sal_min_ppt between 10 and 34),
+  sal_max_ppt         numeric(4, 1) not null default 32 check (sal_max_ppt between 10 and 34),
+  sal_hyst_ppt        numeric(3, 1) not null default 2 check (sal_hyst_ppt between 1 and 5),
+  bilge_max_run_min   integer not null default 15 check (bilge_max_run_min between 5 and 60),
+  bilge_min_off_min   integer not null default 30 check (bilge_min_off_min between 10 and 120),
+  bilge_max_fails     integer not null default 3 check (bilge_max_fails between 1 and 10),
+  retention_days      integer check (retention_days between 7 and 3650),
+  updated_at          timestamptz not null default now(),
+  updated_by          uuid,
   constraint device_settings_sal_order check (sal_max_ppt > sal_min_ppt)
 );
 
@@ -91,7 +99,8 @@ create table public.device_settings (
 --   fault       invalid/implausible signal; value withheld
 --   not_present sensor not detected
 -- Derived values (salinity, NH3 fraction) use:
---   ok | over_range | unavailable (a required input is missing/invalid)
+--   ok | over_range | under_range (outside the formula's valid domain) |
+--   unavailable (a required input is missing/invalid)
 -- A NULL value is never a legitimate zero.
 -- ---------------------------------------------------------------------------
 create table public.device_state (
@@ -110,10 +119,14 @@ create table public.device_state (
   selector_position    text not null check (selector_position in ('AUTO', 'MANUAL', 'OFF', 'FAULT')),
   manual_expires_in_s  integer,
   do_emergency         boolean not null default false,
+  -- Relay channels in use: K1 air pump 1, K5 air pump 2, K3 bilge pump 1,
+  -- K4 bilge pump 2. K2 is not used (defective terminal on the module).
   relay_k1             boolean not null,
-  relay_k2             boolean not null,
   relay_k3             boolean not null,
   relay_k4             boolean not null,
+  relay_k5             boolean not null,
+  bilge_state          text not null check (bilge_state in ('IDLE', 'RUNNING', 'RESTING', 'LOCKOUT')),
+  bilge_fail_count     integer not null default 0,
 
   ph                   double precision check (ph between 0 and 14),
   ph_status            text not null,
@@ -141,8 +154,8 @@ create table public.device_state (
     ec_status       in ('ok', 'degraded', 'over_range', 'fault', 'not_present') and
     temp_status     in ('ok', 'degraded', 'over_range', 'fault', 'not_present') and
     do_status       in ('ok', 'degraded', 'over_range', 'fault', 'not_present') and
-    salinity_status in ('ok', 'over_range', 'unavailable') and
-    nh3_status      in ('ok', 'over_range', 'unavailable')),
+    salinity_status in ('ok', 'over_range', 'under_range', 'unavailable') and
+    nh3_status      in ('ok', 'over_range', 'under_range', 'unavailable')),
   constraint device_state_withheld_values check (
     (ph_status       in ('ok', 'degraded') or ph is null) and
     (ec_status       in ('ok', 'degraded') or (ec_ms_cm is null and ec25_ms_cm is null)) and
@@ -162,9 +175,10 @@ create table public.readings (
   mode             public.operating_mode not null,
   do_emergency     boolean not null,
   relay_k1         boolean not null,
-  relay_k2         boolean not null,
   relay_k3         boolean not null,
   relay_k4         boolean not null,
+  relay_k5         boolean not null,
+  bilge_state      text not null,
   ph               double precision check (ph between 0 and 14),
   ph_status        text not null,
   ec_ms_cm         double precision check (ec_ms_cm >= 0),
@@ -222,7 +236,7 @@ create table public.commands (
   device_id      uuid not null references public.devices (id) on delete cascade,
   created_at     timestamptz not null default now(),
   expires_at     timestamptz not null,
-  kind           text not null check (kind in ('set_mode', 'set_relays', 'calibration')),
+  kind           text not null check (kind in ('set_mode', 'set_relays', 'calibration', 'clear_bilge_lockout')),
   payload        jsonb not null,
   status         public.command_status not null default 'pending',
   status_message text,
@@ -339,8 +353,8 @@ begin
       raise exception 'OFF must be explicitly confirmed' using errcode = '22023';
     end if;
   elsif p_kind = 'set_relays' then
-    if cardinality(v_keys) = 0 or not (v_keys <@ array['k1', 'k2', 'k3', 'k4']) then
-      raise exception 'set_relays accepts only k1..k4' using errcode = '22023';
+    if cardinality(v_keys) = 0 or not (v_keys <@ array['k1', 'k3', 'k4', 'k5']) then
+      raise exception 'set_relays accepts only k1, k3, k4 and k5' using errcode = '22023';
     end if;
     if exists (select 1 from jsonb_each(p_payload) e where jsonb_typeof(e.value) <> 'boolean') then
       raise exception 'Relay states must be true or false' using errcode = '22023';
@@ -351,6 +365,10 @@ begin
        or coalesce(p_payload ->> 'action', '') not in ('enter', 'capture', 'save', 'abort') then
       raise exception 'calibration requires {"sensor": "ph"|"ec"|"do", "action": "enter"|"capture"|"save"|"abort"}'
         using errcode = '22023';
+    end if;
+  elsif p_kind = 'clear_bilge_lockout' then
+    if cardinality(v_keys) <> 0 then
+      raise exception 'clear_bilge_lockout takes no parameters' using errcode = '22023';
     end if;
   else
     raise exception 'Unknown command kind %', p_kind using errcode = '22023';
@@ -371,9 +389,18 @@ begin
 end;
 $$;
 
--- Salinity thresholds for the AUTO bilge-pump logic. The device picks up the
--- new version on its next report and echoes it in device_state.settings_version.
-create or replace function public.update_device_settings(p_device uuid, p_sal_min_ppt numeric, p_sal_max_ppt numeric)
+-- Thresholds for the AUTO bilge-pump logic and the history retention option.
+-- The device picks up the new version on its next report and echoes it in
+-- device_state.settings_version. p_retention_days NULL = keep history forever.
+create or replace function public.update_device_settings(
+  p_device uuid,
+  p_sal_min_ppt numeric,
+  p_sal_max_ppt numeric,
+  p_sal_hyst_ppt numeric,
+  p_bilge_max_run_min integer,
+  p_bilge_min_off_min integer,
+  p_bilge_max_fails integer,
+  p_retention_days integer)
 returns integer
 language plpgsql security definer
 set search_path = public, pg_temp
@@ -392,9 +419,28 @@ begin
   if p_sal_max_ppt <= p_sal_min_ppt then
     raise exception 'salMax must be higher than salMin' using errcode = '22023';
   end if;
+  if p_sal_hyst_ppt is null or p_sal_hyst_ppt not between 1 and 5 then
+    raise exception 'salHyst must be between 1 and 5 ppt' using errcode = '22023';
+  end if;
+  if p_bilge_max_run_min is null or p_bilge_max_run_min not between 5 and 60 then
+    raise exception 'Bilge maximum run time must be between 5 and 60 min' using errcode = '22023';
+  end if;
+  if p_bilge_min_off_min is null or p_bilge_min_off_min not between 10 and 120 then
+    raise exception 'Bilge minimum off time must be between 10 and 120 min' using errcode = '22023';
+  end if;
+  if p_bilge_max_fails is null or p_bilge_max_fails not between 1 and 10 then
+    raise exception 'Bilge maximum failures must be between 1 and 10' using errcode = '22023';
+  end if;
+  if p_retention_days is not null and p_retention_days not between 7 and 3650 then
+    raise exception 'Retention must be between 7 and 3650 days, or empty to keep everything'
+      using errcode = '22023';
+  end if;
 
   update public.device_settings
      set sal_min_ppt = round(p_sal_min_ppt, 1), sal_max_ppt = round(p_sal_max_ppt, 1),
+         sal_hyst_ppt = round(p_sal_hyst_ppt, 1), bilge_max_run_min = p_bilge_max_run_min,
+         bilge_min_off_min = p_bilge_min_off_min, bilge_max_fails = p_bilge_max_fails,
+         retention_days = p_retention_days,
          version = version + 1, updated_at = now(), updated_by = auth.uid()
    where device_id = p_device
   returning version into v_version;
@@ -442,7 +488,7 @@ begin
   insert into public.device_state as s (
     device_id, updated_at, last_history_at, seq, uptime_s, firmware_version, simulated, wifi_rssi_dbm,
     settings_version, mode, mode_source, selector_position, manual_expires_in_s, do_emergency,
-    relay_k1, relay_k2, relay_k3, relay_k4,
+    relay_k1, relay_k3, relay_k4, relay_k5, bilge_state, bilge_fail_count,
     ph, ph_status, ph_mv, ec_ms_cm, ec25_ms_cm, ec_status, ec_mv, salinity_ppt, salinity_status,
     temp_c, temp_status, temp2_c, do_mg_l, do_status, do_mv, nh3_fraction, nh3_status,
     calibration, faults)
@@ -452,8 +498,9 @@ begin
     (p_report ->> 'rssi')::integer, (p_report ->> 'settings_version')::integer,
     (p_report ->> 'mode')::public.operating_mode, p_report ->> 'mode_source', p_report ->> 'selector',
     (p_report ->> 'manual_expires_in_s')::integer, coalesce((p_report ->> 'do_emergency')::boolean, false),
-    (p_report #>> '{relays,k1}')::boolean, (p_report #>> '{relays,k2}')::boolean,
-    (p_report #>> '{relays,k3}')::boolean, (p_report #>> '{relays,k4}')::boolean,
+    (p_report #>> '{relays,k1}')::boolean, (p_report #>> '{relays,k3}')::boolean,
+    (p_report #>> '{relays,k4}')::boolean, (p_report #>> '{relays,k5}')::boolean,
+    p_report #>> '{bilge,state}', coalesce((p_report #>> '{bilge,fail_count}')::integer, 0),
     (p_report #>> '{ph,value}')::double precision, p_report #>> '{ph,status}', (p_report #>> '{ph,mv}')::double precision,
     (p_report #>> '{ec,ec_ms_cm}')::double precision, (p_report #>> '{ec,ec25_ms_cm}')::double precision,
     p_report #>> '{ec,status}', (p_report #>> '{ec,mv}')::double precision,
@@ -470,8 +517,9 @@ begin
     settings_version = excluded.settings_version,
     mode = excluded.mode, mode_source = excluded.mode_source, selector_position = excluded.selector_position,
     manual_expires_in_s = excluded.manual_expires_in_s, do_emergency = excluded.do_emergency,
-    relay_k1 = excluded.relay_k1, relay_k2 = excluded.relay_k2,
-    relay_k3 = excluded.relay_k3, relay_k4 = excluded.relay_k4,
+    relay_k1 = excluded.relay_k1, relay_k3 = excluded.relay_k3,
+    relay_k4 = excluded.relay_k4, relay_k5 = excluded.relay_k5,
+    bilge_state = excluded.bilge_state, bilge_fail_count = excluded.bilge_fail_count,
     ph = excluded.ph, ph_status = excluded.ph_status, ph_mv = excluded.ph_mv,
     ec_ms_cm = excluded.ec_ms_cm, ec25_ms_cm = excluded.ec25_ms_cm, ec_status = excluded.ec_status, ec_mv = excluded.ec_mv,
     salinity_ppt = excluded.salinity_ppt, salinity_status = excluded.salinity_status,
@@ -482,16 +530,24 @@ begin
 
   if v_store then
     insert into public.readings (
-      device_id, seq, simulated, mode, do_emergency, relay_k1, relay_k2, relay_k3, relay_k4,
+      device_id, seq, simulated, mode, do_emergency, relay_k1, relay_k3, relay_k4, relay_k5, bilge_state,
       ph, ph_status, ec_ms_cm, ec25_ms_cm, ec_status, salinity_ppt, salinity_status,
       temp_c, temp_status, do_mg_l, do_status, nh3_fraction, nh3_status,
       ph_cal_id, ec_cal_id, do_cal_id)
-    select device_id, seq, simulated, mode, do_emergency, relay_k1, relay_k2, relay_k3, relay_k4,
+    select device_id, seq, simulated, mode, do_emergency, relay_k1, relay_k3, relay_k4, relay_k5, bilge_state,
            ph, ph_status, ec_ms_cm, ec25_ms_cm, ec_status, salinity_ppt, salinity_status,
            temp_c, temp_status, do_mg_l, do_status, nh3_fraction, nh3_status,
            (calibration #>> '{ph,cal_id}')::bigint, (calibration #>> '{ec,cal_id}')::bigint,
            (calibration #>> '{do,cal_id}')::bigint
     from public.device_state where device_id = v_device;
+
+    -- Retention option: delete this device's history older than the chosen
+    -- window (no-op when retention_days is NULL = keep forever).
+    delete from public.readings r
+     using public.device_settings s
+     where s.device_id = v_device and s.retention_days is not null
+       and r.device_id = v_device
+       and r.recorded_at < now() - make_interval(days => s.retention_days);
   end if;
 
   -- Calibration records: one row per (sensor, cal_id) the device reports as active.
@@ -552,7 +608,9 @@ begin
     into v_cmds
   from picked;
 
-  select jsonb_build_object('version', version, 'sal_min_ppt', sal_min_ppt, 'sal_max_ppt', sal_max_ppt)
+  select jsonb_build_object('version', version, 'sal_min_ppt', sal_min_ppt, 'sal_max_ppt', sal_max_ppt,
+                            'sal_hyst_ppt', sal_hyst_ppt, 'bilge_max_run_min', bilge_max_run_min,
+                            'bilge_min_off_min', bilge_min_off_min, 'bilge_max_fails', bilge_max_fails)
     into v_settings
   from public.device_settings where device_id = v_device;
 
@@ -628,22 +686,6 @@ as $$
   update public.devices set active = p_active where id = p_device;
 $$;
 
--- Telemetry retention: history rows older than the window are deleted.
--- Calibration records, events and commands are kept. Export CSV before pruning.
-create or replace function public.prune_old_readings(p_keep interval default interval '90 days')
-returns bigint
-language plpgsql security definer
-set search_path = public, pg_temp
-as $$
-declare
-  v_count bigint;
-begin
-  delete from public.readings where recorded_at < now() - p_keep;
-  get diagnostics v_count = row_count;
-  return v_count;
-end;
-$$;
-
 -- ---------------------------------------------------------------------------
 -- Privileges and Row Level Security
 -- ---------------------------------------------------------------------------
@@ -685,27 +727,27 @@ create policy commands_read on public.commands
 revoke all on function
   public.has_device_access(uuid), public.normalize_access_code(text), public.sha256_hex(text),
   public.claim_device_access(text), public.server_time(), public.request_command(uuid, text, jsonb),
-  public.update_device_settings(uuid, numeric, numeric), public.device_report(text, jsonb),
+  public.update_device_settings(uuid, numeric, numeric, numeric, integer, integer, integer, integer),
+  public.device_report(text, jsonb),
   public.admin_register_device(text, text, text), public.admin_rotate_access_code(uuid, text),
-  public.admin_rotate_device_token(uuid, text), public.admin_set_device_active(uuid, boolean),
-  public.prune_old_readings(interval)
+  public.admin_rotate_device_token(uuid, text), public.admin_set_device_active(uuid, boolean)
   from public, anon, authenticated;
 
 grant execute on function
   public.has_device_access(uuid), public.claim_device_access(text), public.server_time(),
-  public.request_command(uuid, text, jsonb), public.update_device_settings(uuid, numeric, numeric)
+  public.request_command(uuid, text, jsonb),
+  public.update_device_settings(uuid, numeric, numeric, numeric, integer, integer, integer, integer)
   to authenticated;
 
 grant execute on function public.device_report(text, jsonb) to anon, authenticated;
 
 grant execute on function
   public.admin_register_device(text, text, text), public.admin_rotate_access_code(uuid, text),
-  public.admin_rotate_device_token(uuid, text), public.admin_set_device_active(uuid, boolean),
-  public.prune_old_readings(interval)
+  public.admin_rotate_device_token(uuid, text), public.admin_set_device_active(uuid, boolean)
   to service_role;
 
 -- ---------------------------------------------------------------------------
--- Realtime and retention scheduling
+-- Realtime
 -- ---------------------------------------------------------------------------
 do $$
 begin
@@ -718,14 +760,3 @@ $$;
 alter publication supabase_realtime add table
   public.device_state, public.device_settings, public.readings, public.commands,
   public.events, public.calibration_records;
-
--- Daily pruning when pg_cron is enabled (Database > Extensions > pg_cron).
--- Without pg_cron nothing is deleted automatically.
-do $$
-begin
-  if exists (select 1 from pg_extension where extname = 'pg_cron') then
-    perform cron.schedule('salimango-prune-readings', '17 3 * * *',
-                          'select public.prune_old_readings()');
-  end if;
-end;
-$$;
